@@ -1,0 +1,171 @@
+# S1 — Remote Person Detection
+
+Splits person detection into two parts:
+
+- **`sender/`** — runs on the local machine. Grabs frames from an MJPEG camera stream, sends them to the remote YOLO API, counts detected persons, and feeds a local dashboard.
+- **`server/`** — runs on an Azure VM inside Docker. Exposes a FastAPI `/predict` endpoint that runs YOLOv8 inference on uploaded images.
+
+```
+Camera (MJPEG stream)
+        │
+        ▼
+sender/sender.py ──── POST /predict ────▶ server (Azure VM, Docker) ────▶ YOLOv8 detections (JSON)
+        │
+        ▼
+database.csv + processed_frame.jpg ────▶ index.html dashboard (Chart.js)
+```
+
+---
+
+## 1. Server (Azure VM)
+
+### Prerequisites (one-time, Azure Portal)
+
+1. Create an **Ubuntu Data Science Virtual Machine (DSVM)** — Docker is pre-installed.
+   - GPU size (e.g. `Standard_NC4as_T4_v3`) for fast inference, or a CPU size for testing.
+2. In the VM's **Networking** settings, add an **Inbound Security Rule** allowing TCP on port **80** (or use an existing rule).
+
+### Deploy / update
+
+Push your code to Git, then from the local machine:
+
+```bash
+export VM_HOST=<azure-vm-public-ip>          # required
+export REPO_URL=https://github.com/your-username/your-repo.git  # required
+export VM_USER=azureuser                     # optional, default: azureuser
+export REMOTE_DIR=~/yolo-api                 # optional, default: ~/yolo-api
+
+./deploy.sh
+```
+
+`deploy.sh` SSHes into the VM and:
+- clones the repo on the first run,
+- runs `git pull` on subsequent runs,
+- builds the image and starts the service with `docker compose up -d --build`,
+- prints the container status.
+
+**Auth:** with password authentication, `deploy.sh` prompts for the VM password when run. For passwordless deploys, set up an SSH key once:
+
+```bash
+ssh-copy-id azureuser@<VM_PUBLIC_IP>
+```
+
+On a GPU VM, add `gpus: all` to the `yolo-api` service in `docker-compose.yml`.
+
+### Verify
+
+```bash
+curl -X POST -F "file=@some_image.jpg" http://<VM_PUBLIC_IP>/predict
+```
+
+Response:
+
+```json
+{
+  "detections": [
+    {
+      "class": 0,
+      "name": "person",
+      "confidence": 0.87,
+      "box": {"x1": 120.5, "y1": 80.2, "x2": 300.1, "y2": 480.9}
+    }
+  ]
+}
+```
+
+### Manage
+
+Run over SSH (`ssh azureuser@<VM_PUBLIC_IP>`):
+
+```bash
+cd ~/yolo-api
+docker compose ps          # status
+docker compose logs -f    # logs
+docker compose down        # stop
+```
+
+### Run locally (no VM)
+
+For testing without an Azure VM, run the server on the local machine.
+
+With Docker (from the repo root):
+
+```bash
+docker compose up --build
+```
+
+Without Docker (Python 3.9+ with [uv](https://docs.astral.sh/uv/)):
+
+```bash
+cd server
+uv sync
+uv run uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+Then point the sender at it:
+
+```bash
+export YOLO_API_URL=http://127.0.0.1:8000/predict
+```
+
+The API is available at `http://127.0.0.1:8000/predict` (interactive docs at `http://127.0.0.1:8000/docs`).
+
+---
+
+## 2. Sender (local machine)
+
+### Setup
+
+Python 3.9+ with [uv](https://docs.astral.sh/uv/):
+
+```bash
+cd sender
+uv sync
+```
+
+### Configure
+
+Point the sender at your VM:
+
+```bash
+export YOLO_API_URL=http://<VM_PUBLIC_IP>/predict
+```
+
+(The VM exposes the service on port **80**; the container still listens on 8000 internally, mapped by `docker-compose.yml`.)
+
+Camera stream URL and detection thresholds are constants at the top of `sender/sender.py`:
+
+| Constant | Default | Meaning |
+|---|---|---|
+| `STREAM_URL` | `http://79.3.91.147:9002/mjpg/video.mjpg` | MJPEG camera stream |
+| `PERSON_CLASS_ID` | `0` | COCO class id for "person" |
+| `CONFIDENCE_THRESHOLD` | `0.5` | Minimum detection confidence |
+| `POLL_INTERVAL_SECONDS` | `0.5` | Delay between frames |
+
+### Run
+
+```bash
+cd sender
+uv run python sender.py
+```
+
+Stop with `Ctrl+C`. While running it:
+1. reads a frame from the camera stream,
+2. sends it to `YOLO_API_URL`,
+3. draws green boxes around detected persons,
+4. appends `timestamp, person_count` to `sender/database.csv`,
+5. writes the annotated frame to `sender/processed_frame.jpg`.
+
+### Dashboard
+
+With the sender running, open `sender/index.html` (or serve the folder with any static server). It reloads every second, showing the annotated frame and a live person-count chart.
+
+---
+
+## 3. Full workflow
+
+1. Provision the Azure DSVM and open port 8000 (once).
+2. Commit and push code changes to Git.
+3. `./deploy.sh` — deploy or update the server.
+4. `export YOLO_API_URL=...` and `uv run python sender/sender.py` on the local machine.
+5. Open `sender/index.html` to watch the counts.

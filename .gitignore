@@ -22,3 +22,7 @@ venv/
 
 # Logs
 *.log
+
+processed_frame.jpg
+database.csv
+*.pt

@@ -1,0 +1,12 @@
+[project]
+name = "s1-server"
+version = "0.1.0"
+requires-python = ">=3.9"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "python-multipart>=0.0.12",
+    "ultralytics>=8.4.123",
+    "numpy>=2.0.2",
+    "opencv-python>=5.0.0.93",
+]

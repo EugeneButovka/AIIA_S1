@@ -1,9 +1,9 @@
 [project]
-name = "s1"
+name = "s1-sender"
 version = "0.1.0"
 requires-python = ">=3.9"
 dependencies = [
     "numpy>=2.0.2",
     "opencv-python>=5.0.0.93",
-    "ultralytics>=8.4.123",
+    "requests>=2.32.0",
 ]
