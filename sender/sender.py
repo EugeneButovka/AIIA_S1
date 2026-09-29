@@ -12,10 +12,28 @@ CONFIDENCE_THRESHOLD = 0.5
 POLL_INTERVAL_SECONDS = 0.5
 REQUEST_TIMEOUT_SECONDS = 30
 
-STREAM_URL = "http://79.3.91.147:9002/mjpg/video.mjpg"
+OUTPUT_DIR = Path(__file__).resolve().parent
+DEPLOY_ENV_FILE = OUTPUT_DIR.parent / "deploy.env"
+
+STREAM_URL = os.environ.get("STREAM_URL", "http://47.181.86.62:8082/mjpg/video.mjpg")
+# STREAM_URL = "http://79.3.91.147:9002/mjpg/video.mjpg" # alternative
+
+
+def load_deploy_env():
+    if not DEPLOY_ENV_FILE.exists():
+        return
+    for line in DEPLOY_ENV_FILE.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        os.environ.setdefault(key.strip(), value.strip())
+
+
+load_deploy_env()
+
 API_URL = os.environ.get("YOLO_API_URL", "http://<YOUR_VM_PUBLIC_IP>/predict")
 
-OUTPUT_DIR = Path(__file__).resolve().parent
 CSV_FILENAME = OUTPUT_DIR / "database.csv"
 FRAME_FILENAME = OUTPUT_DIR / "processed_frame.jpg"
 
@@ -67,8 +85,13 @@ def main():
             if not ret:
                 print("Error: Could not read frame.")
                 break
+            height, width = frame.shape[:2]
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] new image {width}x{height} prepared, sending to server")
+            started_at = time.time()
             detections = predict(frame)
+            elapsed = time.time() - started_at
             person_count = draw_person_boxes(frame, detections)
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] server response: {len(detections)} detections, {person_count} person(s), {elapsed:.2f}s")
             save_person_count(person_count)
             cv2.imwrite(str(FRAME_FILENAME), frame)
             time.sleep(POLL_INTERVAL_SECONDS)

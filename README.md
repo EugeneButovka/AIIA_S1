@@ -22,21 +22,37 @@ database.csv + processed_frame.jpg ────▶ index.html dashboard (Chart.j
 ### Prerequisites (one-time, Azure Portal)
 
 1. Create an **Ubuntu Data Science Virtual Machine (DSVM)** — Docker is pre-installed.
+   - On a plain Ubuntu VM, `deploy.sh` installs Docker automatically (requires passwordless `sudo`, default for Azure VM users).
    - GPU size (e.g. `Standard_NC4as_T4_v3`) for fast inference, or a CPU size for testing.
 2. In the VM's **Networking** settings, add an **Inbound Security Rule** allowing TCP on port **80** (or use an existing rule).
 
 ### Deploy / update
 
-Push your code to Git, then from the local machine:
+Configuration lives in the gitignored `deploy.env` file in the repo root — both `deploy.sh` and the sender read it automatically:
 
 ```bash
-export VM_HOST=<azure-vm-public-ip>          # required
-export REPO_URL=https://github.com/your-username/your-repo.git  # required
-export VM_USER=azureuser                     # optional, default: azureuser
-export REMOTE_DIR=~/yolo-api                 # optional, default: ~/yolo-api
-
-./deploy.sh
+VM_HOST=<azure-vm-public-ip>
+VM_USER=<ssh-user>
+REPO_URL=<your-git-repo-url>
+YOLO_API_URL=http://<azure-vm-public-ip>/predict
 ```
+
+Push your code to Git, then deploy from the local machine:
+
+```bash
+cd server
+../deploy.sh
+```
+
+| Variable | Required | Default | Meaning |
+|---|---|---|---|
+| `VM_HOST` | yes | — | Azure VM public IP |
+| `REPO_URL` | yes | — | Git repository URL |
+| `VM_USER` | no | `azureuser` | SSH user; deploys to that user home `yolo-api` folder on the VM |
+| `REMOTE_DIR` | no | `~/yolo-api` on the VM | absolute path, `~`-relative, or name — resolved on the VM side |
+| `YOLO_API_URL` | used by sender | placeholder | URL of the `/predict` endpoint |
+
+Exported environment variables override `deploy.env` values.
 
 `deploy.sh` SSHes into the VM and:
 - clones the repo on the first run,
@@ -83,6 +99,24 @@ docker compose ps          # status
 docker compose logs -f    # logs
 docker compose down        # stop
 ```
+
+### Manual run on the VM (without Docker)
+
+For debugging, run the server directly on the VM. Stop the Docker service first (`docker compose down`), otherwise both fight over port 8000:
+
+```bash
+cd ~/yolo-api/server
+uv sync
+uv run uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+If `uv` is missing on the VM, install it once:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+The service is then reachable on port 8000 directly (no Docker port mapping), so the sender URL becomes `http://<VM_PUBLIC_IP>:8000/predict` with port 8000 open in the NSG.
 
 ### Run locally (no VM)
 
