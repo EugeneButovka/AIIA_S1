@@ -85,9 +85,48 @@ Response:
       "confidence": 0.87,
       "box": {"x1": 120.5, "y1": 80.2, "x2": 300.1, "y2": 480.9}
     }
-  ]
+  ],
+  "persons": 1,
+  "inference_ms": 31.2,
+  "response_ms": 180.4
 }
 ```
+
+### Results storage (CSV)
+
+Every prediction is appended to `server/data/results.csv` on the VM (mounted as a Docker volume, so it persists across container restarts and redeployments):
+
+```csv
+timestamp_utc,persons,detections,avg_confidence,inference_ms,response_ms,image_bytes,response_bytes
+2026-09-30T00:23:15.765452+00:00,1,1,0.6054,29.9,180.9,493218,205
+```
+
+### Dashboard & performance data
+
+The server hosts a web dashboard at **`http://<VM_PUBLIC_IP>/`** (public, port 80). It auto-refreshes every 5 seconds and shows:
+
+- **Histogram** of person counts per frame
+- **Persons over time** line chart
+- **CPU / memory usage** chart of the VM
+- Cards with throughput, response times, bandwidth totals, uptime, and estimated cost
+
+Backing endpoints:
+
+- `GET /stats` — aggregate performance metrics (JSON)
+- `GET /history` — recent per-request records (JSON)
+
+Performance data (Task 2.5) mapping:
+
+| Metric | Where | Implementation |
+|---|---|---|
+| Detection efficiency | `frames_per_second`, `detections_per_frame`, `avg_inference_ms` | requests / uptime, YOLO inference timings |
+| Memory usage | `memory_percent`, `memory_used_mb` / `memory_total_mb` | `psutil` (VM-wide) |
+| CPU usage | `cpu_percent`, `resource_history` chart | `psutil`, sampled every 4 s |
+| Bandwidth consumption | `bytes_in`, `bytes_out` | sum of uploaded image and response payload sizes |
+| Monetary cost | `cost_per_hour`, `cost_total` | `COST_PER_HOUR` env (default `$0.096`/h) × uptime |
+| Response time | `avg_response_ms`, `p95_response_ms` | full request handling time, avg and 95th percentile |
+
+Set your VM's actual price with `COST_PER_HOUR=...` in `deploy.env` — `docker-compose.yml` passes it through to the container.
 
 ### Manage
 

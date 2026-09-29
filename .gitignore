@@ -27,3 +27,4 @@ deploy.env
 processed_frame.jpg
 database.csv
 *.pt
+server/data/

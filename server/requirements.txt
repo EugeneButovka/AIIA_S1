@@ -4,3 +4,4 @@ python-multipart
 ultralytics
 numpy
 opencv-python
+psutil

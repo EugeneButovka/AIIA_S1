@@ -4,3 +4,7 @@ services:
     ports:
       - "80:8000"
     restart: always
+    volumes:
+      - ./server/data:/app/data
+    environment:
+      - COST_PER_HOUR=${COST_PER_HOUR:-0.096}
