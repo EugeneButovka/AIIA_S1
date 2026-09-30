@@ -7,4 +7,4 @@ services:
     volumes:
       - ./server/data:/app/data
     environment:
-      - COST_PER_HOUR=${COST_PER_HOUR:-0.096}
+      - COST_PER_HOUR=${COST_PER_HOUR:-}

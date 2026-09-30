@@ -29,6 +29,11 @@
     </div>
 
     <div class="chart-box">
+        <h2>Average detection confidence over time</h2>
+        <canvas id="confidenceChart" height="140"></canvas>
+    </div>
+
+    <div class="chart-box">
         <h2>CPU / Memory usage (VM)</h2>
         <canvas id="resourcesChart" height="140"></canvas>
     </div>
@@ -55,6 +60,7 @@ function renderCards(stats) {
         ['Avg response', stats.avg_response_ms + ' ms'],
         ['P95 response', stats.p95_response_ms + ' ms'],
         ['Avg inference', stats.avg_inference_ms + ' ms'],
+        ['Avg confidence', stats.avg_confidence],
         ['Throughput', stats.frames_per_second + ' fps'],
         ['Detections / frame', stats.detections_per_frame],
         ['CPU usage', stats.cpu_percent + ' %'],
@@ -63,7 +69,8 @@ function renderCards(stats) {
         ['Bandwidth out', fmtBytes(stats.bytes_out)],
         ['Uptime', fmtDuration(stats.uptime_seconds)],
         ['Est. cost so far', '$' + stats.cost_total.toFixed(4)],
-        ['Cost rate', '$' + stats.cost_per_hour.toFixed(3) + ' / hour'],
+        ['Est. cost / month', '$' + stats.cost_per_month.toFixed(2)],
+        ['Cost source', stats.cost_source],
     ];
     document.getElementById('cards').innerHTML = cards
         .map(([label, value]) => '<div class="card"><div class="label">' + label + '</div><div class="value">' + value + '</div></div>')
@@ -105,6 +112,26 @@ function renderPersonsChart(history) {
     });
 }
 
+function renderConfidenceChart(history) {
+    const recent = history.slice(-120);
+    if (charts.confidence) charts.confidence.destroy();
+    charts.confidence = new Chart(document.getElementById('confidenceChart'), {
+        type: 'line',
+        data: {
+            labels: recent.map(entry => entry.timestamp.slice(11, 19)),
+            datasets: [{
+                label: 'Avg confidence',
+                data: recent.map(entry => entry.avg_confidence),
+                borderColor: 'rgba(227, 162, 37, 1)',
+                borderWidth: 2,
+                fill: false,
+                spanGaps: true,
+            }]
+        },
+        options: { responsive: true, animation: false, scales: { y: { beginAtZero: true, suggestedMax: 1 } } }
+    });
+}
+
 function renderResourcesChart(stats) {
     const recent = stats.resource_history.slice(-90);
     if (charts.resources) charts.resources.destroy();
@@ -129,6 +156,7 @@ async function refresh() {
         renderCards(stats);
         renderHistogram(history);
         renderPersonsChart(history);
+        renderConfidenceChart(history);
         renderResourcesChart(stats);
     } catch (error) {
         console.error(error);
