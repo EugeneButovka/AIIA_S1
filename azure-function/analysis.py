@@ -117,6 +117,19 @@ def to_analysis_record(
     return replace(record, response_bytes=len(json.dumps(payload).encode("utf-8")))
 
 
+def process_prediction(blob_name: str, image_data: bytes, result: DetectionResult, response_ms: float) -> None:
+    record = to_analysis_record(result, blob_name, image_data, response_ms)
+    connection_string = os.environ["AzureWebJobsStorage"]
+    container_name = os.environ.get("RESULTS_CONTAINER_NAME", DEFAULT_RESULTS_CONTAINER)
+    csv_name = os.environ.get("RESULTS_CSV_NAME", DEFAULT_RESULTS_CSV)
+    append_analysis_row(connection_string, container_name, csv_name, record)
+    processed_image = draw_detection_boxes(image_data, result.detections)
+    if processed_image is None:
+        logger.warning("could not render processed image for %s", blob_name)
+        return
+    upload_processed_image(connection_string, container_name, build_processed_blob_name(blob_name), processed_image)
+
+
 def analyze_blob(blob_name: str, image_data: bytes) -> None:
     started_at = time.perf_counter()
     # client = build_client()
@@ -137,17 +150,5 @@ def analyze_blob(blob_name: str, image_data: bytes) -> None:
         logger.warning("skipped %s: %s", blob_name, error)
         return
     response_ms = (time.perf_counter() - started_at) * 1000
-    record = to_analysis_record(result, blob_name, image_data, response_ms)
-    connection_string = os.environ["AzureWebJobsStorage"]
-    container_name = os.environ.get("RESULTS_CONTAINER_NAME", DEFAULT_RESULTS_CONTAINER)
-    csv_name = os.environ.get("RESULTS_CSV_NAME", DEFAULT_RESULTS_CSV)
-    append_analysis_row(connection_string, container_name, csv_name, record)
-    # people = result.people.list if result.people else []
-    # objects = result.objects.list if result.objects else []
-    # processed_image = draw_detection_boxes(image_data, extract_people_boxes(people), extract_object_boxes(objects))
-    processed_image = draw_detection_boxes(image_data, result.detections)
-    if processed_image is None:
-        logger.warning("could not render processed image for %s", blob_name)
-        return
-    upload_processed_image(connection_string, container_name, build_processed_blob_name(blob_name), processed_image)
+    process_prediction(blob_name, image_data, result, response_ms)
     logger.info("analyzed %s", blob_name)

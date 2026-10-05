@@ -15,6 +15,7 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    environment: AIIA_S1_ENV
     steps:
       - name: Checkout
         uses: actions/checkout@v4

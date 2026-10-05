@@ -1,3 +1,4 @@
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -12,6 +13,11 @@ BOX_THICKNESS = 2
 
 def build_processed_blob_name(blob_name: str) -> str:
     return f"processed_{Path(blob_name).stem}.jpg"
+
+
+def build_request_blob_name(timestamp=None) -> str:
+    stamp = timestamp or datetime.now()
+    return f"predict_{stamp.strftime('%Y%m%d_%H%M%S_%f')}.jpg"
 
 
 # Azure Vision (Image Analysis 4.0) drawing — disabled in favour of the local YOLO model:

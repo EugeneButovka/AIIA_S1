@@ -2,7 +2,7 @@
 
 End-to-end person-counting pipeline split across two machines:
 
-- **`sender/`** (local machine) — grabs frames from an MJPEG camera stream, sends them to the remote YOLO API, and feeds a local dashboard.
+- **`sender/`** (local machine) — grabs frames from an MJPEG camera stream, sends them to the remote YOLO API, and feeds a local dashboard; with `SEND_MODE=azure` it instead uploads frames to the Azure Function's input storage.
 - **`server/`** (Azure VM, Docker) — FastAPI service that runs YOLOv8 inference, stores results in a CSV, and hosts a public dashboard with live performance metrics.
 - **`azure-function/`** (serverless, optional) — blob-triggered pipeline running the same YOLO model as the server: no GPU VM, no Docker, scale-to-zero. Writes CSV rows in the same schema as the server and annotated images in the sender style.
 
@@ -23,8 +23,9 @@ sender dashboard (local)              results.csv + public dashboard at http://<
 ├── deploy.env            # gitignored config (VM host, repo URL, API URL) — used by everything
 ├── docker-compose.yml    # builds ./server, maps port 80 → 8000, restart: always
 ├── sender/
-│   ├── sender.py         # frame grabber + API client + CSV/annotated-frame writer
+│   ├── sender.py         # frame grabber: VM server, function /api/predict, or blob upload (SEND_MODE)
 │   ├── index.html        # local dashboard (annotated frame + person-count chart)
+│   ├── tests/            # pytest suite (mode resolution + upload path)
 │   └── pyproject.toml
 ├── server/
 │   ├── main.py           # app assembly (create_app)
@@ -79,6 +80,10 @@ YOLO_API_URL=http://<azure-vm-public-ip>/predict
 | `YOLO_API_URL` | no | placeholder | sender | `/predict` endpoint URL |
 | `STREAM_URL` | no | hardcoded camera | sender | MJPEG camera stream URL |
 | `COST_PER_HOUR` | no | Azure auto-lookup | server | hourly rate override for cost estimation |
+| `SEND_MODE` | no | `server` | sender | `server` = POST to `YOLO_API_URL`; `azure` = POST to the function's `/api/predict`; `azure-blob` = fire-and-forget upload to the function's `uploads` container |
+| `AZURE_PREDICT_URL` | yes when `SEND_MODE=azure` | — | sender | Azure Function predict endpoint — note: **Flex Consumption apps use a unique default domain** shown in the portal (e.g. `https://<name>-<hash>.<region>.azurewebsites.net/api/predict`), not `<name>.azurewebsites.net` |
+| `AZURE_STORAGE_CONNECTION_STRING` | yes when `SEND_MODE=azure-blob` | — | sender | storage account connection string of the function app |
+| `AZURE_UPLOAD_CONTAINER` | no | `uploads` | sender | input container watched by the `analyze_image` blob trigger |
 
 Exported environment variables always override `deploy.env` values.
 
@@ -210,6 +215,27 @@ Tuning constants at the top of `sender/sender.py`:
 | `CONFIDENCE_THRESHOLD` | `0.5` | minimum detection confidence |
 | `POLL_INTERVAL_SECONDS` | `0.5` | delay between frames |
 
+### Azure modes (optional)
+
+Two `SEND_MODE` values reroute frames from the VM server to the Azure Function (section 3):
+
+```bash
+SEND_MODE=azure
+AZURE_PREDICT_URL=https://<default-domain>/api/predict
+```
+
+On the Flex Consumption plan the default domain is unique per app (`<name>-<hash>.<region>.azurewebsites.net`) — copy it from the function app's Overview page in the portal.
+
+`azure` — the function's `/api/predict` accepts the same multipart upload and returns the same JSON as the VM server's `/predict`, so the sender keeps its full local behavior: green boxes on the frame, `database.csv` rows, `processed_frame.jpg`, and the local dashboard. Each request is also recorded by the function into the `results` container.
+
+```bash
+SEND_MODE=azure-blob
+AZURE_STORAGE_CONNECTION_STRING=<function-app-storage-account-connection-string>
+# AZURE_UPLOAD_CONTAINER=uploads
+```
+
+`azure-blob` — fire-and-forget: each frame is uploaded to the `uploads` container as `frame_YYYYMMDD_HHMMSS_<microseconds>.jpg` (container auto-created if missing), and the `analyze_image` blob trigger does the rest. Results exist only in the cloud (`results` container), so the sender skips the local draw/CSV/frame steps and the local dashboard stays empty.
+
 ### Local dashboard
 
 With the sender running, open `sender/index.html`. It reloads every second, showing the annotated frame and a live person-count chart from `sender/database.csv`.
@@ -235,12 +261,17 @@ azure-function (blob trigger analyze_image)
 
 Detection runs the **same YOLO model as the server** (`detection.py` mirrors `server/detection.py`, weights `yolov8n.pt`, auto-downloaded on first run). The Azure AI Vision (Image Analysis 4.0) code is kept commented in `analysis.py` / `processed_image.py` for reference — uncomment it to switch back.
 
+Input images come from any upload into the `uploads` container — e.g. Storage Explorer or `az storage blob upload` — or from the sender in `SEND_MODE=azure` (section 2), which POSTs to `/api/predict` instead.
+
 ### Functions
 
 | Function | Trigger | Purpose |
 |---|---|---|
 | `analyze_image` | new blob in `uploads/{name}` | analyze image → append CSV row → upload annotated image |
+| `predict` | HTTP `POST /api/predict` | same request/response format as the server's `/predict` — also records CSV row + annotated image; used by the sender in `SEND_MODE=azure` |
 | `hello` | HTTP `GET /api/hello?name=...` | sample health-check endpoint (anonymous) |
+
+Input images can enter the pipeline two ways: a blob dropped into the `uploads` container (Storage Explorer, `az storage blob upload`, or the sender in `SEND_MODE=azure-blob`) fires `analyze_image`, while an HTTP POST to `/api/predict` (multipart `file` field or raw body — used by the sender in `SEND_MODE=azure`) returns the server-compatible JSON payload synchronously. Both feed the same recording flow.
 
 ### CSV schema (aligned with the server)
 
@@ -255,7 +286,7 @@ timestamp_utc,persons,detections,avg_confidence,inference_ms,response_ms,image_b
 ### Local development
 
 ```bash
-cd azure-function && uv sync && uv run pytest   # 26 tests, no network needed
+cd azure-function && uv sync && uv run pytest   # 30 tests, no network needed
 docker run -d -p 10000:10000 mcr.microsoft.com/azure-storage/azurite azurite-blob --blobHost 0.0.0.0
 func start
 ```
