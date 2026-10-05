@@ -303,9 +303,9 @@ az functionapp create --name <app-name> --resource-group rg-s1-function \
   --storage-account <unique-storage-name> --flexconsumption-location westeurope \
   --runtime python --runtime-version 3.12 --functions-version 4
 az functionapp config appsettings set --name <app-name> --resource-group rg-s1-function \
-  --settings RESULTS_CONTAINER_NAME=results RESULTS_CSV_NAME=analysis.csv \
-             YOLO_WEIGHTS=/tmp/yolov8n.pt
+  --settings YOLO_WEIGHTS=yolov8n.pt RESULTS_CONTAINER_NAME=results RESULTS_CSV_NAME=analysis.csv
 az storage container create --name uploads --account-name <unique-storage-name>
+az storage container create --name results --account-name <unique-storage-name>
 func azure functionapp publish <app-name>
 ```
 
@@ -313,8 +313,8 @@ Settings (managed in `local.settings.json` locally, app settings in Azure):
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AzureWebJobsStorage` | — | storage account connection string: trigger + `results` container |
-| `YOLO_WEIGHTS` | `yolov8n.pt` | YOLO weights path (same `yolov8n.pt` model as the server) |
+| `AzureWebJobsStorage` | — | trigger + `results` container: a connection string locally (Azurite); on Flex Consumption prefer identity-based settings (`AzureWebJobsStorage__blobServiceUri` + `AzureWebJobsStorage__credential=managedIdentity` + `AzureWebJobsStorage__clientId`) — this is what the portal's "application storage" flow configures, and the results writer supports both forms |
+| `YOLO_WEIGHTS` | `yolov8n.pt` | YOLO weights path (same `yolov8n.pt` model as the server); CI bundles the file into the deployment package |
 | `RESULTS_CONTAINER_NAME` | `results` | output container (auto-created on first write) |
 | `RESULTS_CSV_NAME` | `analysis.csv` | CSV blob name in the results container |
 | `VISION_ENDPOINT` / `VISION_KEY` | — | unused — only needed if the commented Azure Vision path is re-enabled |
@@ -322,7 +322,8 @@ Settings (managed in `local.settings.json` locally, app settings in Azure):
 Deployment notes:
 
 - **Plan**: PyTorch + ultralytics exceed the 500 MB app size limit of the classic Consumption plan — use **Flex Consumption** (as above) or Premium, not `--consumption-plan-location`.
-- **Weights**: the Consumption sandbox only guarantees `/tmp` as writable, hence `YOLO_WEIGHTS=/tmp/yolov8n.pt` — ultralytics downloads the model there once per instance. Alternatively bundle the weights with the app folder before `func publish`.
+- **CI/CD** (`.github/workflows/deploy-azure-function.yml`): runs the test suite, then vendors dependencies into `.python_packages/` with **CPU-only torch** (`requirements.txt` pins `torch==…+cpu` — plain Linux torch would pull CUDA libs and add gigabytes), bundles `yolov8n.pt`, and deploys the zip via `functions-action`. Flex Consumption restricts the Kudu settings API, so remote build (`SCM_DO_BUILD_DURING_DEPLOYMENT`) can't be toggled there — hence the vendored package.
+- **Storage auth**: with identity-based storage the function app's managed identity needs `Storage Blob Data Contributor` on the account — the portal assigns this when you attach application storage during creation.
 - The Azure AI Vision resource is no longer needed; create one (ComputerVision, `F0`) only if you re-enable the commented vision path. Microsoft announced Image Analysis 4.0 retirement for September 2028.
 
 ---

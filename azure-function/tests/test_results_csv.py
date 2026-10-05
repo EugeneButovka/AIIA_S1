@@ -1,9 +1,17 @@
 import csv
 import io
 
+import pytest
 from azure.core.exceptions import ResourceExistsError
 
-from results import AnalysisRecord, append_analysis_row, build_csv_header, build_csv_row, upload_processed_image
+from results import (
+    AnalysisRecord,
+    append_analysis_row,
+    build_blob_service,
+    build_csv_header,
+    build_csv_row,
+    upload_processed_image,
+)
 
 
 def build_record(**overrides):
@@ -83,13 +91,91 @@ class FakeBlobServiceClient:
         return FakeContainer(self.state, container_name)
 
 
-def install_fake_storage(monkeypatch):
+def install_fake_storage():
     state = {"containers": set(), "blobs": {}, "settings": {}, "images": {}, "image_uploads": []}
+    return state, FakeBlobServiceClient(state)
+
+
+def test_build_blob_service_uses_connection_string(monkeypatch):
+    # given
+    monkeypatch.setenv("AzureWebJobsStorage", "fake-connection-string")
+    captured = {}
+
+    def fake_from_connection_string(connection_string):
+        captured["connection_string"] = connection_string
+        return "fake-service"
+
     monkeypatch.setattr(
         "results.BlobServiceClient.from_connection_string",
-        staticmethod(lambda connection_string: FakeBlobServiceClient(state)),
+        staticmethod(fake_from_connection_string),
     )
-    return state
+
+    # when
+    service = build_blob_service()
+
+    # then
+    assert service == "fake-service"
+    assert captured["connection_string"] == "fake-connection-string"
+
+
+def test_build_blob_service_uses_managed_identity(monkeypatch):
+    # given
+    monkeypatch.delenv("AzureWebJobsStorage", raising=False)
+    monkeypatch.setenv("AzureWebJobsStorage__blobServiceUri", "https://account.blob.core.windows.net")
+    monkeypatch.setenv("AzureWebJobsStorage__credential", "managedIdentity")
+    monkeypatch.setenv("AzureWebJobsStorage__clientId", "client-123")
+    created = {}
+
+    class FakeCredential:
+        def __init__(self, **kwargs):
+            created["credential_kwargs"] = kwargs
+
+    class FakeBlobServiceClientConstructor:
+        def __init__(self, account_url=None, credential=None):
+            created["account_url"] = account_url
+            created["credential"] = credential
+
+    monkeypatch.setattr("results.DefaultAzureCredential", FakeCredential)
+    monkeypatch.setattr("results.BlobServiceClient", FakeBlobServiceClientConstructor)
+
+    # when
+    build_blob_service()
+
+    # then
+    assert created["credential_kwargs"] == {"managed_identity_client_id": "client-123"}
+    assert created["account_url"] == "https://account.blob.core.windows.net"
+    assert isinstance(created["credential"], FakeCredential)
+
+
+def test_build_blob_service_uses_default_credential_without_client_id(monkeypatch):
+    # given
+    monkeypatch.delenv("AzureWebJobsStorage", raising=False)
+    monkeypatch.setenv("AzureWebJobsStorage__blobServiceUri", "https://account.blob.core.windows.net")
+    monkeypatch.delenv("AzureWebJobsStorage__clientId", raising=False)
+    created = {}
+
+    class FakeCredential:
+        def __init__(self, **kwargs):
+            created["credential_kwargs"] = kwargs
+
+    monkeypatch.setattr("results.DefaultAzureCredential", FakeCredential)
+    monkeypatch.setattr("results.BlobServiceClient", lambda **kwargs: kwargs)
+
+    # when
+    build_blob_service()
+
+    # then
+    assert created["credential_kwargs"] == {}
+
+
+def test_build_blob_service_requires_storage_configuration(monkeypatch):
+    # given
+    monkeypatch.delenv("AzureWebJobsStorage", raising=False)
+    monkeypatch.delenv("AzureWebJobsStorage__blobServiceUri", raising=False)
+
+    # when / then
+    with pytest.raises(RuntimeError):
+        build_blob_service()
 
 
 def test_build_csv_header_lists_all_columns():
@@ -130,13 +216,13 @@ def test_build_csv_row_escapes_special_characters():
     ]
 
 
-def test_append_analysis_row_creates_container_blob_and_header(monkeypatch):
+def test_append_analysis_row_creates_container_blob_and_header():
     # given
-    state = install_fake_storage(monkeypatch)
+    state, service = install_fake_storage()
     record = build_record(blob_name="uploads/frame.jpg", ocr_text="hello")
 
     # when
-    append_analysis_row("connection", "results", "analysis.csv", record)
+    append_analysis_row(service, "results", "analysis.csv", record)
 
     # then
     assert "results" in state["containers"]
@@ -146,13 +232,13 @@ def test_append_analysis_row_creates_container_blob_and_header(monkeypatch):
     assert state["settings"][("results", "analysis.csv")].content_type == "text/csv"
 
 
-def test_append_analysis_row_appends_without_duplicating_header(monkeypatch):
+def test_append_analysis_row_appends_without_duplicating_header():
     # given
-    state = install_fake_storage(monkeypatch)
-    append_analysis_row("connection", "results", "analysis.csv", build_record(ocr_text="hello"))
+    state, service = install_fake_storage()
+    append_analysis_row(service, "results", "analysis.csv", build_record(ocr_text="hello"))
 
     # when
-    append_analysis_row("connection", "results", "analysis.csv", build_record(ocr_text="hello"))
+    append_analysis_row(service, "results", "analysis.csv", build_record(ocr_text="hello"))
 
     # then
     content = state["blobs"][("results", "analysis.csv")]
@@ -160,25 +246,25 @@ def test_append_analysis_row_appends_without_duplicating_header(monkeypatch):
     assert content.count(b"\r\n") == 3
 
 
-def test_append_analysis_row_uses_existing_container(monkeypatch):
+def test_append_analysis_row_uses_existing_container():
     # given
-    state = install_fake_storage(monkeypatch)
+    state, service = install_fake_storage()
     state["containers"].add("results")
 
     # when
-    append_analysis_row("connection", "results", "analysis.csv", build_record(ocr_text="hello"))
+    append_analysis_row(service, "results", "analysis.csv", build_record(ocr_text="hello"))
 
     # then
     assert "results" in state["containers"]
     assert ("results", "analysis.csv") in state["blobs"]
 
 
-def test_upload_processed_image_creates_container_and_uploads_jpeg(monkeypatch):
+def test_upload_processed_image_creates_container_and_uploads_jpeg():
     # given
-    state = install_fake_storage(monkeypatch)
+    state, service = install_fake_storage()
 
     # when
-    upload_processed_image("connection", "results", "processed_frame.jpg", b"jpeg-bytes")
+    upload_processed_image(service, "results", "processed_frame.jpg", b"jpeg-bytes")
 
     # then
     assert "results" in state["containers"]
@@ -188,14 +274,14 @@ def test_upload_processed_image_creates_container_and_uploads_jpeg(monkeypatch):
     assert upload["content_settings"].content_type == "image/jpeg"
 
 
-def test_upload_processed_image_overwrites_existing_blob(monkeypatch):
+def test_upload_processed_image_overwrites_existing_blob():
     # given
-    state = install_fake_storage(monkeypatch)
+    state, service = install_fake_storage()
     state["containers"].add("results")
     state["images"][("results", "processed_frame.jpg")] = b"old-bytes"
 
     # when
-    upload_processed_image("connection", "results", "processed_frame.jpg", b"new-bytes")
+    upload_processed_image(service, "results", "processed_frame.jpg", b"new-bytes")
 
     # then
     assert state["images"][("results", "processed_frame.jpg")] == b"new-bytes"

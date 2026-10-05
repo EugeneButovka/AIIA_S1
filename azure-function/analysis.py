@@ -19,6 +19,7 @@ from results import (
     DEFAULT_RESULTS_CSV,
     AnalysisRecord,
     append_analysis_row,
+    build_blob_service,
     upload_processed_image,
 )
 
@@ -119,15 +120,15 @@ def to_analysis_record(
 
 def process_prediction(blob_name: str, image_data: bytes, result: DetectionResult, response_ms: float) -> None:
     record = to_analysis_record(result, blob_name, image_data, response_ms)
-    connection_string = os.environ["AzureWebJobsStorage"]
+    service = build_blob_service()
     container_name = os.environ.get("RESULTS_CONTAINER_NAME", DEFAULT_RESULTS_CONTAINER)
     csv_name = os.environ.get("RESULTS_CSV_NAME", DEFAULT_RESULTS_CSV)
-    append_analysis_row(connection_string, container_name, csv_name, record)
+    append_analysis_row(service, container_name, csv_name, record)
     processed_image = draw_detection_boxes(image_data, result.detections)
     if processed_image is None:
         logger.warning("could not render processed image for %s", blob_name)
         return
-    upload_processed_image(connection_string, container_name, build_processed_blob_name(blob_name), processed_image)
+    upload_processed_image(service, container_name, build_processed_blob_name(blob_name), processed_image)
 
 
 def analyze_blob(blob_name: str, image_data: bytes) -> None:

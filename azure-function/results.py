@@ -1,8 +1,10 @@
 import csv
 import io
+import os
 from dataclasses import dataclass
 
 from azure.core.exceptions import ResourceExistsError
+from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient, ContentSettings
 
 CSV_COLUMNS: tuple[str, ...] = (
@@ -69,13 +71,27 @@ def build_csv_row(record: AnalysisRecord) -> bytes:
     return buffer.getvalue().encode("utf-8")
 
 
+def build_blob_service() -> BlobServiceClient:
+    connection_string = os.environ.get("AzureWebJobsStorage")
+    if connection_string:
+        return BlobServiceClient.from_connection_string(connection_string)
+    blob_service_uri = os.environ.get("AzureWebJobsStorage__blobServiceUri")
+    if not blob_service_uri:
+        raise RuntimeError("AzureWebJobsStorage or AzureWebJobsStorage__blobServiceUri is required")
+    client_id = os.environ.get("AzureWebJobsStorage__clientId")
+    if client_id:
+        credential = DefaultAzureCredential(managed_identity_client_id=client_id)
+    else:
+        credential = DefaultAzureCredential()
+    return BlobServiceClient(account_url=blob_service_uri, credential=credential)
+
+
 def append_analysis_row(
-    connection_string: str,
+    service: BlobServiceClient,
     container_name: str,
     csv_name: str,
     record: AnalysisRecord,
 ) -> None:
-    service = BlobServiceClient.from_connection_string(connection_string)
     container = service.get_container_client(container_name)
     if not container.exists():
         try:
@@ -94,12 +110,11 @@ def append_analysis_row(
 
 
 def upload_processed_image(
-    connection_string: str,
+    service: BlobServiceClient,
     container_name: str,
     blob_name: str,
     image_data: bytes,
 ) -> None:
-    service = BlobServiceClient.from_connection_string(connection_string)
     container = service.get_container_client(container_name)
     if not container.exists():
         try:

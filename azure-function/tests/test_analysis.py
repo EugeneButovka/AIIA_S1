@@ -96,19 +96,19 @@ def install_pipeline(monkeypatch, detector):
     uploaded = []
     drawn = []
 
-    def fake_append(connection_string, container_name, csv_name, record):
-        appended.append((connection_string, container_name, csv_name, record))
+    def fake_append(service, container_name, csv_name, record):
+        appended.append((service, container_name, csv_name, record))
 
-    def fake_upload(connection_string, container_name, blob_name, image_data):
-        uploaded.append((connection_string, container_name, blob_name, image_data))
+    def fake_upload(service, container_name, blob_name, image_data):
+        uploaded.append((service, container_name, blob_name, image_data))
 
     def fake_draw(image_data, detections):
         drawn.append((image_data, detections))
         return b"processed-bytes"
 
-    monkeypatch.setenv("AzureWebJobsStorage", "fake-connection-string")
     monkeypatch.delenv("RESULTS_CONTAINER_NAME", raising=False)
     monkeypatch.delenv("RESULTS_CSV_NAME", raising=False)
+    monkeypatch.setattr("analysis.build_blob_service", lambda: "fake-service")
     monkeypatch.setattr("analysis.get_detector", lambda: detector)
     monkeypatch.setattr("analysis.append_analysis_row", fake_append)
     monkeypatch.setattr("analysis.upload_processed_image", fake_upload)
@@ -127,15 +127,15 @@ def test_analyze_blob_appends_record_and_uploads_processed_image(monkeypatch):
     # then
     assert detector.calls == [b"image-bytes"]
     assert len(appended) == 1
-    connection_string, container_name, csv_name, record = appended[0]
-    assert connection_string == "fake-connection-string"
+    service, container_name, csv_name, record = appended[0]
+    assert service == "fake-service"
     assert container_name == "results"
     assert csv_name == "analysis.csv"
     assert record.persons == 1
     assert record.detections == 2
     assert record.image_bytes == len(b"image-bytes")
     assert drawn == [(b"image-bytes", build_result().detections)]
-    assert uploaded == [("fake-connection-string", "results", "processed_frame.jpg", b"processed-bytes")]
+    assert uploaded == [("fake-service", "results", "processed_frame.jpg", b"processed-bytes")]
 
 
 def test_analyze_blob_skips_upload_when_render_fails(monkeypatch):

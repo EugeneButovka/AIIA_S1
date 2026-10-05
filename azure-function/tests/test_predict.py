@@ -66,19 +66,19 @@ def install_pipeline(monkeypatch, detector):
     uploaded = []
     drawn = []
 
-    def fake_append(connection_string, container_name, csv_name, record):
-        appended.append((connection_string, container_name, csv_name, record))
+    def fake_append(service, container_name, csv_name, record):
+        appended.append((service, container_name, csv_name, record))
 
-    def fake_upload(connection_string, container_name, blob_name, image_data):
-        uploaded.append((connection_string, container_name, blob_name, image_data))
+    def fake_upload(service, container_name, blob_name, image_data):
+        uploaded.append((service, container_name, blob_name, image_data))
 
     def fake_draw(image_data, detections):
         drawn.append((image_data, detections))
         return b"processed-bytes"
 
-    monkeypatch.setenv("AzureWebJobsStorage", "fake-connection-string")
     monkeypatch.delenv("RESULTS_CONTAINER_NAME", raising=False)
     monkeypatch.delenv("RESULTS_CSV_NAME", raising=False)
+    monkeypatch.setattr("analysis.build_blob_service", lambda: "fake-service")
     monkeypatch.setattr("function_app.get_detector", lambda: detector)
     monkeypatch.setattr("analysis.append_analysis_row", fake_append)
     monkeypatch.setattr("analysis.upload_processed_image", fake_upload)

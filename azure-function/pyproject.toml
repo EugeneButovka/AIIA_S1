@@ -5,6 +5,7 @@ requires-python = ">=3.9"
 dependencies = [
     "azure-functions>=1.21.0",
     "azure-ai-vision-imageanalysis>=1.0.0b2",
+    "azure-identity>=1.17.0",
     "azure-storage-blob>=12.24.0",
     "opencv-python-headless>=5.0.0.93",
     "numpy>=2.0.2",
