@@ -28,3 +28,5 @@ processed_frame.jpg
 database.csv
 *.pt
 server/data/
+azure-function/local.settings.json
+*.PublishSettings

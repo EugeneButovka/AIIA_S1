@@ -1,0 +1,36 @@
+name: Deploy Azure Function
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "azure-function/**"
+      - ".github/workflows/deploy-azure-function.yml"
+  workflow_dispatch:
+
+env:
+  AZURE_FUNCTIONAPP_NAME: aiiafunctionapp
+  AZURE_FUNCTIONAPP_PACKAGE_PATH: azure-function
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Run tests
+        working-directory: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
+        run: |
+          uv sync
+          uv run pytest
+
+      - name: Deploy to Azure
+        uses: Azure/functions-action@v1
+        with:
+          app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
+          package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
+          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}

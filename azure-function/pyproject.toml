@@ -1,0 +1,21 @@
+[project]
+name = "s1-azure-function"
+version = "0.1.0"
+requires-python = ">=3.9"
+dependencies = [
+    "azure-functions>=1.21.0",
+    "azure-ai-vision-imageanalysis>=1.0.0b2",
+    "azure-storage-blob>=12.24.0",
+    "opencv-python-headless>=5.0.0.93",
+    "numpy>=2.0.2",
+    "ultralytics>=8.4.123",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

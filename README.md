@@ -4,6 +4,7 @@ End-to-end person-counting pipeline split across two machines:
 
 - **`sender/`** (local machine) — grabs frames from an MJPEG camera stream, sends them to the remote YOLO API, and feeds a local dashboard.
 - **`server/`** (Azure VM, Docker) — FastAPI service that runs YOLOv8 inference, stores results in a CSV, and hosts a public dashboard with live performance metrics.
+- **`azure-function/`** (serverless, optional) — blob-triggered pipeline running the same YOLO model as the server: no GPU VM, no Docker, scale-to-zero. Writes CSV rows in the same schema as the server and annotated images in the sender style.
 
 ```
 Camera (MJPEG stream)
@@ -25,16 +26,24 @@ sender dashboard (local)              results.csv + public dashboard at http://<
 │   ├── sender.py         # frame grabber + API client + CSV/annotated-frame writer
 │   ├── index.html        # local dashboard (annotated frame + person-count chart)
 │   └── pyproject.toml
-└── server/
-    ├── main.py           # app assembly (create_app)
-    ├── config.py         # settings, paths, env parsing
-    ├── routes.py         # endpoints: /predict, /stats, /history, /
-    ├── detection.py      # YOLO wrapper (Detector, DetectionResult)
-    ├── storage.py        # CSV results store (ResultsStore, PredictionRecord)
-    ├── metrics.py        # performance tracker (stats, resource sampling)
-    ├── cost.py           # Azure cost auto-resolution (IMDS + Retail Prices API)
-    ├── static/index.html # public dashboard
-    └── pyproject.toml
+├── server/
+│   ├── main.py           # app assembly (create_app)
+│   ├── config.py         # settings, paths, env parsing
+│   ├── routes.py         # endpoints: /predict, /stats, /history, /
+│   ├── detection.py      # YOLO wrapper (Detector, DetectionResult)
+│   ├── storage.py        # CSV results store (ResultsStore, PredictionRecord)
+│   ├── metrics.py        # performance tracker (stats, resource sampling)
+│   ├── cost.py           # Azure cost auto-resolution (IMDS + Retail Prices API)
+│   ├── static/index.html # public dashboard
+│   └── pyproject.toml
+└── azure-function/
+    ├── function_app.py    # hello (HTTP sample) + analyze_image (blob trigger)
+    ├── detection.py       # YOLOv8n detector (mirrors server/detection.py)
+    ├── analysis.py        # pipeline: detect → CSV row → annotated image (Vision path commented)
+    ├── processed_image.py # detection-box drawing (JPEG re-encode, sender style)
+    ├── results.py         # CSV append-blob writer + processed-image upload
+    ├── local.settings.json# gitignored local config (Azurite connection, weights path)
+    └── tests/             # pytest suite (no network needed)
 ```
 
 ## Quick start
@@ -209,7 +218,85 @@ Note: the camera is a single-client MJPEG server — while the sender is running
 
 ---
 
-## 3. Local testing (no VM)
+## 3. Azure Function (serverless image AI)
+
+Serverless alternative to the VM server: images uploaded to Azure Storage are analyzed by the **same YOLOv8n model as the server** (`detection.py` mirrors `server/detection.py`) — no GPU VM, no Docker, scale-to-zero. The Azure Vision (Image Analysis 4.0) implementation is kept commented in the code for reference.
+
+```
+uploads/ container (image upload)
+        │
+        ▼
+azure-function (blob trigger analyze_image)
+        │
+        ├── YOLOv8n inference (same model as the server, ultralytics)
+        ├── results/analysis.csv          # one row per image, header written once
+        └── results/processed_<name>.jpg   # image with detection boxes drawn
+```
+
+Detection runs the **same YOLO model as the server** (`detection.py` mirrors `server/detection.py`, weights `yolov8n.pt`, auto-downloaded on first run). The Azure AI Vision (Image Analysis 4.0) code is kept commented in `analysis.py` / `processed_image.py` for reference — uncomment it to switch back.
+
+### Functions
+
+| Function | Trigger | Purpose |
+|---|---|---|
+| `analyze_image` | new blob in `uploads/{name}` | analyze image → append CSV row → upload annotated image |
+| `hello` | HTTP `GET /api/hello?name=...` | sample health-check endpoint (anonymous) |
+
+### CSV schema (aligned with the server)
+
+`server/storage.py` is the source of format truth: the first 8 columns are identical to `server/data/results.csv`, with extras appended. The last four (`blob_name`, `caption`, `caption_confidence`, `tags`, `ocr_text`) keep the schema stable — the vision-only fields stay empty while the YOLO path is active:
+
+```csv
+timestamp_utc,persons,detections,avg_confidence,inference_ms,response_ms,image_bytes,response_bytes,blob_name,caption,caption_confidence,tags,ocr_text
+```
+
+`persons` counts person-class detections with confidence ≥ 0.5 (same threshold as server and sender). Annotated images mirror the sender: green boxes around detected persons, thickness 2.
+
+### Local development
+
+```bash
+cd azure-function && uv sync && uv run pytest   # 26 tests, no network needed
+docker run -d -p 10000:10000 mcr.microsoft.com/azure-storage/azurite azurite-blob --blobHost 0.0.0.0
+func start
+```
+
+`local.settings.json` points `AzureWebJobsStorage` at local Azurite; the YOLO weights download automatically on first invocation. Upload a test image (e.g. via [Azure Storage Explorer](https://azure.microsoft.com/products/storage/storage-explorer/)) into the `uploads` container and watch the CSV row and annotated image appear in `results`.
+
+### Deploy (one-time)
+
+```bash
+az group create --name rg-s1-function --location westeurope
+az storage account create --name <unique-storage-name> --resource-group rg-s1-function \
+  --location westeurope --sku Standard_LRS
+az functionapp create --name <app-name> --resource-group rg-s1-function \
+  --storage-account <unique-storage-name> --flexconsumption-location westeurope \
+  --runtime python --runtime-version 3.12 --functions-version 4
+az functionapp config appsettings set --name <app-name> --resource-group rg-s1-function \
+  --settings RESULTS_CONTAINER_NAME=results RESULTS_CSV_NAME=analysis.csv \
+             YOLO_WEIGHTS=/tmp/yolov8n.pt
+az storage container create --name uploads --account-name <unique-storage-name>
+func azure functionapp publish <app-name>
+```
+
+Settings (managed in `local.settings.json` locally, app settings in Azure):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `AzureWebJobsStorage` | — | storage account connection string: trigger + `results` container |
+| `YOLO_WEIGHTS` | `yolov8n.pt` | YOLO weights path (same `yolov8n.pt` model as the server) |
+| `RESULTS_CONTAINER_NAME` | `results` | output container (auto-created on first write) |
+| `RESULTS_CSV_NAME` | `analysis.csv` | CSV blob name in the results container |
+| `VISION_ENDPOINT` / `VISION_KEY` | — | unused — only needed if the commented Azure Vision path is re-enabled |
+
+Deployment notes:
+
+- **Plan**: PyTorch + ultralytics exceed the 500 MB app size limit of the classic Consumption plan — use **Flex Consumption** (as above) or Premium, not `--consumption-plan-location`.
+- **Weights**: the Consumption sandbox only guarantees `/tmp` as writable, hence `YOLO_WEIGHTS=/tmp/yolov8n.pt` — ultralytics downloads the model there once per instance. Alternatively bundle the weights with the app folder before `func publish`.
+- The Azure AI Vision resource is no longer needed; create one (ComputerVision, `F0`) only if you re-enable the commented vision path. Microsoft announced Image Analysis 4.0 retirement for September 2028.
+
+---
+
+## 4. Local testing (no VM)
 
 Run the server on the local machine:
 
@@ -234,7 +321,7 @@ YOLO_API_URL=http://127.0.0.1:8000/predict uv run python sender.py
 
 ---
 
-## 4. Full workflow
+## 5. Full workflow
 
 1. Provision the Azure VM and open port 80 (once).
 2. Commit and push code changes to Git.
@@ -244,7 +331,7 @@ YOLO_API_URL=http://127.0.0.1:8000/predict uv run python sender.py
 
 ---
 
-## 5. Troubleshooting
+## 6. Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
