@@ -98,15 +98,15 @@ def append_analysis_row(
             container.create_container()
         except ResourceExistsError:
             pass
-    append_blob = container.get_append_blob_client(csv_name)
-    if not append_blob.exists():
+    blob = container.get_blob_client(csv_name)
+    if not blob.exists():
         try:
-            append_blob.create(content_settings=ContentSettings(content_type="text/csv"))
+            blob.create_append_blob(content_settings=ContentSettings(content_type="text/csv"))
         except ResourceExistsError:
             pass
         else:
-            append_blob.append_block(build_csv_header())
-    append_blob.append_block(build_csv_row(record))
+            blob.append_block(build_csv_header())
+    blob.append_block(build_csv_row(record))
 
 
 def upload_processed_image(

@@ -33,7 +33,7 @@ def build_record(**overrides):
     return AnalysisRecord(**{**defaults, **overrides})
 
 
-class FakeAppendBlob:
+class FakeBlob:
     def __init__(self, state, container_name, blob_name):
         self.state = state
         self.key = (container_name, blob_name)
@@ -41,7 +41,7 @@ class FakeAppendBlob:
     def exists(self):
         return self.key in self.state["blobs"]
 
-    def create(self, content_settings):
+    def create_append_blob(self, content_settings):
         if self.key in self.state["blobs"]:
             raise ResourceExistsError(message="blob already exists")
         self.state["blobs"][self.key] = b""
@@ -49,12 +49,6 @@ class FakeAppendBlob:
 
     def append_block(self, data):
         self.state["blobs"][self.key] += data
-
-
-class FakeBlockBlob:
-    def __init__(self, state, container_name, blob_name):
-        self.state = state
-        self.key = (container_name, blob_name)
 
     def upload_blob(self, data, overwrite=False, content_settings=None):
         self.state["images"][self.key] = data
@@ -76,11 +70,8 @@ class FakeContainer:
             raise ResourceExistsError(message="container already exists")
         self.state["containers"].add(self.container_name)
 
-    def get_append_blob_client(self, blob_name):
-        return FakeAppendBlob(self.state, self.container_name, blob_name)
-
     def get_blob_client(self, blob_name):
-        return FakeBlockBlob(self.state, self.container_name, blob_name)
+        return FakeBlob(self.state, self.container_name, blob_name)
 
 
 class FakeBlobServiceClient:
