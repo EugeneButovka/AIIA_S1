@@ -11,7 +11,8 @@ from azure.storage.blob import BlobServiceClient, ContentSettings
 
 PERSON_CLASS_ID = 0
 CONFIDENCE_THRESHOLD = 0.5
-POLL_INTERVAL_SECONDS = 0.5
+POLL_INTERVAL_SECONDS = 2.0
+BLOB_SEND_INTERVAL_SECONDS = 5.0
 REQUEST_TIMEOUT_SECONDS = 30
 
 SERVER_MODE = "server"
@@ -22,7 +23,6 @@ OUTPUT_DIR = Path(__file__).resolve().parent
 DEPLOY_ENV_FILE = OUTPUT_DIR.parent / "deploy.env"
 
 STREAM_URL = os.environ.get("STREAM_URL", "http://47.181.86.62:8082/mjpg/video.mjpg")
-# STREAM_URL = "http://79.3.91.147:9002/mjpg/video.mjpg" # alternative
 
 
 def load_deploy_env():
@@ -169,7 +169,12 @@ def main():
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] {destination} response: {len(detections)} detections, {person_count} person(s), {elapsed:.2f}s")
                 save_person_count(person_count)
                 cv2.imwrite(str(FRAME_FILENAME), frame)
-            time.sleep(POLL_INTERVAL_SECONDS)
+            interval = (
+                BLOB_SEND_INTERVAL_SECONDS
+                if uploads_container is not None
+                else POLL_INTERVAL_SECONDS
+            )
+            time.sleep(interval)
     except KeyboardInterrupt:
         pass
     finally:

@@ -217,7 +217,8 @@ Tuning constants at the top of `sender/sender.py`:
 |---|---|---|
 | `PERSON_CLASS_ID` | `0` | COCO class id for "person" |
 | `CONFIDENCE_THRESHOLD` | `0.5` | minimum detection confidence |
-| `POLL_INTERVAL_SECONDS` | `0.5` | delay between frames |
+| `POLL_INTERVAL_SECONDS` | `2.0` | delay between frames (server / azure HTTP modes) |
+| `BLOB_SEND_INTERVAL_SECONDS` | `5.0` | delay between uploads in `azure-blob` mode — slower than the HTTP poll because every upload becomes a trigger invocation on Azure |
 
 ### Azure modes (optional)
 
@@ -314,8 +315,8 @@ func start
 **1. Create the function app** — portal: Function App → Create, runtime **Python**, plan **Flex Consumption** (region e.g. `spaincentral`), and attach **application storage** during creation: this configures the identity-based `AzureWebJobsStorage__*` settings and grants the app's managed identity `Storage Blob Data Contributor` on the account. CLI equivalent:
 
 ```bash
-az group create --name Aiia --location spaincentral
-az functionapp create --name aiiafunctionapp --resource-group Aiia \
+az group create --name <RESOURCE_GROUP> --location spaincentral
+az functionapp create --name <FUNCTION_APP_NAME> --resource-group <RESOURCE_GROUP> \
   --flexconsumption-location spaincentral --runtime python --runtime-version 3.13 \
   --functions-version 4
 ```
@@ -323,27 +324,40 @@ az functionapp create --name aiiafunctionapp --resource-group Aiia \
 **2. App settings** (weights + results location):
 
 ```bash
-az functionapp config appsettings set --name aiiafunctionapp --resource-group Aiia \
+az functionapp config appsettings set --name <FUNCTION_APP_NAME> --resource-group <RESOURCE_GROUP> \
   --settings YOLO_WEIGHTS=yolov8n.pt RESULTS_CONTAINER_NAME=results RESULTS_CSV_NAME=analysis.csv
 ```
 
-**3. Storage & containers** (account `aiia8996` in this deployment). The pipeline uses two containers: `uploads` (trigger input) and `results` (CSV + annotated images); the `azure-webjobs-*` / `app-package-*` containers belong to the platform — leave them alone. Flex application-storage accounts are created with **shared key access disabled** (identity-only), which is fine for the function itself:
+**3. Storage & containers** (account `<STORAGE_ACCOUNT>` in this deployment). The pipeline uses two containers: `uploads` (trigger input) and `results` (CSV + annotated images); the `azure-webjobs-*` / `app-package-*` containers belong to the platform — leave them alone. Flex application-storage accounts are created with **shared key access disabled** (identity-only), which is fine for the function itself:
 
 ```bash
 # ad-hoc az storage commands work with your AAD identity:
-az storage container create --name uploads --account-name aiia8996 --auth-mode login
-az storage container create --name results --account-name aiia8996 --auth-mode login
+az storage container create --name uploads --account-name <STORAGE_ACCOUNT> --auth-mode login
+az storage container create --name results --account-name <STORAGE_ACCOUNT> --auth-mode login
 
 # only needed for the sender's azure-blob mode (account-key connection string):
-az storage account update --name aiia8996 --resource-group Aiia --allow-shared-key-access true
-CONN=$(az storage account show-connection-string --name aiia8996 --resource-group Aiia -o tsv)
+az storage account update --name <STORAGE_ACCOUNT> --resource-group <RESOURCE_GROUP> --allow-shared-key-access true
+CONN=$(az storage account show-connection-string --name <STORAGE_ACCOUNT> --resource-group <RESOURCE_GROUP> -o tsv)
 ```
 
 `results` is also auto-created by the function on first write; `uploads` must exist before blob-trigger traffic starts (the sender auto-creates it too, once key auth works).
 
-**4. Always-ready instance** (blob-trigger mode only) — set **Always ready instances = 1** (portal → function app → Scale). Non-HTTP triggers don't fire reliably from a zero-instance Flex app; one 2048 MB always-ready instance costs ~$2/month.
+**4. Blob trigger wiring** (blob-trigger mode only). Flex Consumption runs **only the event-based (Event Grid) blob trigger** — the default polling trigger silently never fires (it's declared as `source="EventGrid"` on the `@app.blob_trigger` decorator in `function_app.py`). One-time setup:
 
-**5. Deploy** — handled by CI/CD (below); `func azure functionapp publish aiiafunctionapp` from Core Tools works as a manual alternative.
+- **Always ready instances = 1** (portal → function app → Scale) — non-HTTP triggers don't fire reliably from a zero-instance Flex app; one 2048 MB always-ready instance costs ~$2/month.
+- Register the `Microsoft.EventGrid` resource provider on the subscription if it isn't already: `az provider register --namespace Microsoft.EventGrid`.
+- The **Event Grid event subscription** on the `uploads` container (event type *Blob Created*): Flex may auto-provision it on deploy; if not, create it manually — storage account → Events → + Event Subscription → Web Hook endpoint `https://<app-domain>/runtime/webhooks/blobs?functionName=Host.Functions.analyze_image&code=<blobs_extension key>` (key: portal → function app → Functions → App keys → System keys).
+- **Identity roles**: the portal's application-storage flow grants only `Storage Blob Data Contributor`, but the Event Grid blob trigger also uses the account's **Queue** service internally — without `Storage Queue Data Contributor` (and `Storage Table Data Contributor` for host bookkeeping) the function app **crash-loops at host startup** with `403 AuthorizationPermissionMismatch` from the Queue service. Grant both to the app's user-assigned identity (`az functionapp identity show` → `principalId`):
+  ```bash
+  az role assignment create --assignee-object-id <PRINCIPAL_ID> --assignee-principal-type ServicePrincipal --role "Storage Queue Data Contributor" --scope "/subscriptions/<sub>/resourceGroups/<RESOURCE_GROUP>/providers/Microsoft.Storage/storageAccounts/<STORAGE_ACCOUNT>"
+  az role assignment create --assignee-object-id <PRINCIPAL_ID> --assignee-principal-type ServicePrincipal --role "Storage Table Data Contributor" --scope "/subscriptions/<sub>/resourceGroups/<RESOURCE_GROUP>/providers/Microsoft.Storage/storageAccounts/<STORAGE_ACCOUNT>"
+  ```
+
+Flex hosts each function group on separate instances (the Scale blade sets always-ready counts per group: `http`, `blob`, …), so the HTTP endpoints can be healthy while the blob group is wedged — check the group you're actually testing. Failed Event Grid deliveries are retried with backoff for up to 24 hours, so blobs uploaded while the app was down still process once it recovers — but blobs created *before* the event subscription existed never generate events and stay unprocessed forever.
+
+End-to-end latency in this mode is seconds: upload → Event Grid delivery → trigger → YOLO → CSV + annotated image in `results`.
+
+**5. Deploy** — handled by CI/CD (below); `func azure functionapp publish <FUNCTION_APP_NAME>` from Core Tools works as a manual alternative.
 
 Settings (managed in `local.settings.json` locally, app settings in Azure):
 
@@ -359,9 +373,11 @@ Deployment notes:
 
 - **Plan**: PyTorch + ultralytics exceed the 500 MB app size limit of the classic Consumption plan — use **Flex Consumption** or Premium, not `--consumption-plan-location`.
 - **CI/CD** (`.github/workflows/deploy-azure-function.yml`): on push to `main` touching `azure-function/**` → runs the test suite (uv) → vendors dependencies with `pip --target .python_packages/lib/site-packages` — the **Flex layout**, which has no `python3.x` path segment, unlike classic plans — using the **CPU-only torch** pins from `requirements.txt` (plain Linux torch would pull CUDA libs and add gigabytes; the `+cpu` wheels are Linux/Windows-only, so that file only resolves on the Linux runner) → downloads `yolov8n.pt` into the package → deploys the zip via `functions-action` with **`sku: flexconsumption`** (required for publish-profile auth on Flex — without it the action calls the classic Kudu `zipdeploy`, which Flex doesn't support, and fails with `502 Bad Gateway`). `ultralytics` is pinned to the tested version: unpinned, pip can backtrack to a legacy release with a different package layout under wheel-only constraints.
-- **CI/CD auth**: the publish profile lives in the `AZURE_FUNCTIONAPP_PUBLISH_PROFILE` secret of the GitHub **environment** `AIIA_S1_ENV` (the workflow job declares `environment: AIIA_S1_ENV`, which is what makes environment secrets visible to it). SCM basic auth must be enabled on the app (`basicPublishingCredentialsPolicies` → `scm`), and the secret must contain a **freshly downloaded** profile — a profile downloaded while basic auth was disabled keeps failing with `401` even after the policy is re-enabled.
+- **CI/CD GitHub configuration** (repo → Settings → Secrets and variables → Actions):
+    - `AZURE_FUNCTIONAPP_PUBLISH_PROFILE` — **secret** stored in the `AIIA_S1_ENV` **environment** (the workflow job declares `environment: AIIA_S1_ENV`, which is what makes environment secrets visible to it); value = a **freshly downloaded** publish profile — a profile downloaded while SCM basic auth was disabled keeps failing with `401` even after the policy is re-enabled. SCM basic auth must be enabled on the app (`basicPublishingCredentialsPolicies` → `scm`).
+    - `AZURE_FUNCTIONAPP_NAME` — **repository variable** (the *Variables* tab, not Secrets); value = the function app name. The name is not hardcoded in the public workflow file (`${{ vars.AZURE_FUNCTIONAPP_NAME }}`) — without this variable the deploy fails with an empty app name.
 - **Python version**: the workflow's `PYTHON_VERSION` must match the app's worker runtime (`FUNCTIONS_WORKER_RUNTIME_VERSION`, 3.13 here) so the vendored cp313 wheels line up with the interpreter on Azure.
-- **Storage auth**: with identity-based storage the function app's managed identity needs `Storage Blob Data Contributor` on the account — the portal assigns this when you attach application storage during creation.
+- **Storage auth**: with identity-based storage the function app's managed identity needs `Storage Blob Data Contributor` on the account — the portal assigns this when you attach application storage during creation. The blob trigger additionally needs `Storage Queue Data Contributor` + `Storage Table Data Contributor` (see step 4).
 - The Azure AI Vision resource is no longer needed; create one (ComputerVision, `F0`) only if you re-enable the commented vision path. Microsoft announced Image Analysis 4.0 retirement for September 2028.
 
 ---
@@ -404,6 +420,8 @@ YOLO_API_URL=http://127.0.0.1:8000/predict uv run python sender.py
 
 ## 6. Troubleshooting
 
+Live-debug commands (App Insights queries, Event Grid subscription checks, health probes, blob container inspection) are collected in [`azure-debug.md`](azure-debug.md), including a symptom → meaning table for the failure modes below.
+
 | Symptom | Cause | Fix |
 |---|---|---|
 | `failed to bind host port 0.0.0.0:80/tcp: address already in use` | Apache preinstalled on Ubuntu holds port 80 | `sudo systemctl disable --now apache2` (or purge it) |
@@ -417,4 +435,5 @@ YOLO_API_URL=http://127.0.0.1:8000/predict uv run python sender.py
 | `ModuleNotFoundError` on Azure (e.g. `cv2`) but tests pass locally | dependencies missing from the package or in the wrong path | deps must be vendored into `.python_packages/lib/site-packages` (Flex layout, no `python3.x` segment) before the deploy step |
 | `No module named 'pkg_resources'` + old ultralytics layout in Azure logs | pip resolved a legacy `ultralytics` release instead of 8.4.x | `ultralytics` is pinned in `requirements.txt` — keep it pinned |
 | `KeyBasedAuthenticationNotPermitted` from `az storage` commands | shared key access disabled on the account (Flex default) | use `--auth-mode login` for az commands; enable keys only for the sender's `azure-blob` mode |
-| Blob uploads sit unprocessed | zero always-ready instances — the blob trigger doesn't fire on a cold Flex app | set Always ready instances ≥ 1 (portal → Scale) |
+| Blob uploads sit unprocessed | polling-based blob trigger (Flex runs only the Event Grid one), or zero always-ready instances, or missing event subscription | ensure `source="EventGrid"` on the trigger, Always ready instances ≥ 1, and the Blob Created event subscription exists (see §3 step 4) |
+| Function app 503s on everything, `An unhandled exception has occurred. Host is shutting down.` in App Insights right after host start | app identity lacks `Storage Queue Data Contributor` — the Event Grid blob trigger hits the Queue service at startup and 403s (`AuthorizationPermissionMismatch` from `Windows-Azure-Queue`) | grant the queue/table roles to the app identity, then restart (see §3 step 4) |
