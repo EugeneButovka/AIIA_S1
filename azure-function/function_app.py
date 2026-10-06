@@ -52,6 +52,8 @@ def predict(req: func.HttpRequest) -> func.HttpResponse:
     return func.HttpResponse(json.dumps(payload), status_code=200, mimetype="application/json")
 
 
-@app.blob_trigger(arg_name="blob", path="uploads/{name}", connection="AzureWebJobsStorage")
+@app.blob_trigger(
+    arg_name="blob", path="uploads/{name}", connection="AzureWebJobsStorage", source="EventGrid"
+)
 def analyze_image(blob: func.InputStream) -> None:
     analyze_blob(blob.name, blob.read())
