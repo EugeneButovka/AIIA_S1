@@ -17,10 +17,6 @@ CSV_COLUMNS: tuple[str, ...] = (
     "image_bytes",
     "response_bytes",
     "blob_name",
-    "caption",
-    "caption_confidence",
-    "tags",
-    "ocr_text",
 )
 DEFAULT_RESULTS_CONTAINER = "results"
 DEFAULT_RESULTS_CSV = "analysis.csv"
@@ -37,10 +33,6 @@ class AnalysisRecord:
     image_bytes: int
     response_bytes: int
     blob_name: str
-    caption: str
-    caption_confidence: float
-    tags: str
-    ocr_text: str
 
     def to_row(self) -> list:
         return [
@@ -53,10 +45,6 @@ class AnalysisRecord:
             self.image_bytes,
             self.response_bytes,
             self.blob_name,
-            self.caption,
-            round(self.caption_confidence, 4),
-            self.tags,
-            self.ocr_text,
         ]
 
 

@@ -25,10 +25,6 @@ def build_record(**overrides):
         image_bytes=1024,
         response_bytes=512,
         blob_name="uploads/frame 1.jpg",
-        caption="a person, pointing at a screen",
-        caption_confidence=0.48921,
-        tags="person:0.9812",
-        ocr_text='He said "hello"\nnext line',
     )
     return AnalysisRecord(**{**defaults, **overrides})
 
@@ -177,13 +173,13 @@ def test_build_csv_header_lists_all_columns():
     # then
     assert header == (
         b"timestamp_utc,persons,detections,avg_confidence,inference_ms,response_ms,"
-        b"image_bytes,response_bytes,blob_name,caption,caption_confidence,tags,ocr_text\r\n"
+        b"image_bytes,response_bytes,blob_name\r\n"
     )
 
 
 def test_build_csv_row_escapes_special_characters():
     # given
-    record = build_record()
+    record = build_record(blob_name='uploads/frame, "quoted 1".jpg')
 
     # when
     row = build_csv_row(record)
@@ -199,18 +195,14 @@ def test_build_csv_row_escapes_special_characters():
         "200.8",
         "1024",
         "512",
-        "uploads/frame 1.jpg",
-        "a person, pointing at a screen",
-        "0.4892",
-        "person:0.9812",
-        'He said "hello"\nnext line',
+        'uploads/frame, "quoted 1".jpg',
     ]
 
 
 def test_append_analysis_row_creates_container_blob_and_header():
     # given
     state, service = install_fake_storage()
-    record = build_record(blob_name="uploads/frame.jpg", ocr_text="hello")
+    record = build_record(blob_name="uploads/frame.jpg")
 
     # when
     append_analysis_row(service, "results", "analysis.csv", record)
@@ -226,10 +218,10 @@ def test_append_analysis_row_creates_container_blob_and_header():
 def test_append_analysis_row_appends_without_duplicating_header():
     # given
     state, service = install_fake_storage()
-    append_analysis_row(service, "results", "analysis.csv", build_record(ocr_text="hello"))
+    append_analysis_row(service, "results", "analysis.csv", build_record())
 
     # when
-    append_analysis_row(service, "results", "analysis.csv", build_record(ocr_text="hello"))
+    append_analysis_row(service, "results", "analysis.csv", build_record())
 
     # then
     content = state["blobs"][("results", "analysis.csv")]
@@ -243,7 +235,7 @@ def test_append_analysis_row_uses_existing_container():
     state["containers"].add("results")
 
     # when
-    append_analysis_row(service, "results", "analysis.csv", build_record(ocr_text="hello"))
+    append_analysis_row(service, "results", "analysis.csv", build_record())
 
     # then
     assert "results" in state["containers"]

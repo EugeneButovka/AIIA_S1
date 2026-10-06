@@ -292,13 +292,15 @@ Input images can enter the pipeline two ways: a blob dropped into the `uploads` 
 
 ### CSV schema (aligned with the server)
 
-`server/storage.py` is the source of format truth: the first 8 columns are identical to `server/data/results.csv`, with extras appended. The last four (`blob_name`, `caption`, `caption_confidence`, `tags`, `ocr_text`) keep the schema stable — the vision-only fields stay empty while the YOLO path is active:
+`server/storage.py` is the source of format truth: the first 8 columns are identical to `server/data/results.csv`, with `blob_name` appended as a function-specific extra:
 
 ```csv
-timestamp_utc,persons,detections,avg_confidence,inference_ms,response_ms,image_bytes,response_bytes,blob_name,caption,caption_confidence,tags,ocr_text
+timestamp_utc,persons,detections,avg_confidence,inference_ms,response_ms,image_bytes,response_bytes,blob_name
 ```
 
 `persons` counts person-class detections with confidence ≥ 0.5 (same threshold as server and sender). Annotated images mirror the sender: green boxes around detected persons, thickness 2.
+
+Excel note: `timestamp_utc` is ISO-8601 UTC with microseconds (e.g. `2026-10-06T15:47:01.625321+00:00`) and decimals use dots — open the CSV via Excel's *Data → From Text/CSV* import (comma delimiter, dot decimal) rather than double-clicking the file, or the locale may mangle timestamps and shift columns.
 
 ### Local development
 

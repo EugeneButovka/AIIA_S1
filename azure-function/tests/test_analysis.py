@@ -39,10 +39,6 @@ def test_to_analysis_record_extracts_detection_metrics():
     assert record.response_ms == 180.456
     assert record.image_bytes == len(b"image-bytes")
     assert record.blob_name == "uploads/frame.jpg"
-    assert record.caption == ""
-    assert record.caption_confidence == 0.0
-    assert record.tags == ""
-    assert record.ocr_text == ""
     assert record.response_bytes == len(
         json.dumps(build_response_payload(result, 180.456)).encode("utf-8")
     )

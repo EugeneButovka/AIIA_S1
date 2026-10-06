@@ -86,10 +86,6 @@ def build_response_payload(result: DetectionResult, response_ms: float) -> dict:
 #         "avg_confidence": round(record.avg_confidence, 4),
 #         "inference_ms": round(record.inference_ms, 1),
 #         "response_ms": round(record.response_ms, 1),
-#         "caption": record.caption,
-#         "caption_confidence": round(record.caption_confidence, 4),
-#         "tags": record.tags,
-#         "ocr_text": record.ocr_text,
 #     }
 
 
@@ -110,10 +106,6 @@ def to_analysis_record(
         image_bytes=len(image_data),
         response_bytes=0,
         blob_name=blob_name,
-        caption="",
-        caption_confidence=0.0,
-        tags="",
-        ocr_text="",
     )
     return replace(record, response_bytes=len(json.dumps(payload).encode("utf-8")))
 
