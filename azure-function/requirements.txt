@@ -1,10 +1,11 @@
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.14.1+cpu
 torchvision==0.29.1+cpu
+ultralytics==8.4.173
+setuptools
 azure-functions
 azure-ai-vision-imageanalysis
 azure-identity
 azure-storage-blob
 opencv-python-headless
 numpy
-ultralytics
