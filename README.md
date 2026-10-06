@@ -2,19 +2,23 @@
 
 End-to-end person-counting pipeline split across two machines:
 
-- **`sender/`** (local machine) — grabs frames from an MJPEG camera stream, sends them to the remote YOLO API, and feeds a local dashboard; with `SEND_MODE=azure` it instead uploads frames to the Azure Function's input storage.
+- **`sender/`** (local machine) — grabs frames from an MJPEG camera stream, sends them for person detection, and feeds a local dashboard; `SEND_MODE` picks the destination: VM server (`server`), the function's HTTP endpoint (`azure`), or fire-and-forget blob upload (`azure-blob`).
 - **`server/`** (Azure VM, Docker) — FastAPI service that runs YOLOv8 inference, stores results in a CSV, and hosts a public dashboard with live performance metrics.
-- **`azure-function/`** (serverless, optional) — blob-triggered pipeline running the same YOLO model as the server: no GPU VM, no Docker, scale-to-zero. Writes CSV rows in the same schema as the server and annotated images in the sender style.
+- **`azure-function/`** (serverless, Flex Consumption, optional) — the same YOLO model without a GPU VM or Docker: a blob trigger analyzes uploaded images, and an HTTP endpoint mirrors the server's `/predict`. Writes CSV rows in the server's schema plus annotated images in the sender style. Deployed automatically by GitHub Actions.
 
 ```
 Camera (MJPEG stream)
         │
         ▼
-sender/sender.py ──── POST /predict ────▶ server (Azure VM, Docker) ────▶ detections (JSON)
-        │                                        │
-        ▼                                        ▼
-sender dashboard (local)              results.csv + public dashboard at http://<VM_PUBLIC_IP>/
+sender/sender.py ─── SEND_MODE ─┬─ server      ── POST /predict ─────▶ server (Azure VM, Docker) ──▶ results.csv + public dashboard
+                               ├─ azure       ── POST /api/predict ─▶ azure-function (Flex) ─┐ JSON response (server format)
+                               └─ azure-blob  ── blob upload ────────▶ uploads container ─────┘
+                                                                                               │ blob trigger
+                                                                                               ▼
+                                                                        results container: analysis.csv + processed_*.jpg
 ```
+
+The sender's local dashboard (annotated frame + person-count chart) is populated in `server` and `azure` modes; `azure-blob` is fire-and-forget with cloud-only results.
 
 ## Project layout
 
@@ -38,7 +42,7 @@ sender dashboard (local)              results.csv + public dashboard at http://<
 │   ├── static/index.html # public dashboard
 │   └── pyproject.toml
 └── azure-function/
-    ├── function_app.py    # hello (HTTP sample) + analyze_image (blob trigger)
+    ├── function_app.py    # hello (HTTP sample) + predict (HTTP, server format) + analyze_image (blob trigger)
     ├── detection.py       # YOLOv8n detector (mirrors server/detection.py)
     ├── analysis.py        # pipeline: detect → CSV row → annotated image (Vision path commented)
     ├── processed_image.py # detection-box drawing (JPEG re-encode, sender style)
@@ -82,7 +86,7 @@ YOLO_API_URL=http://<azure-vm-public-ip>/predict
 | `COST_PER_HOUR` | no | Azure auto-lookup | server | hourly rate override for cost estimation |
 | `SEND_MODE` | no | `server` | sender | `server` = POST to `YOLO_API_URL`; `azure` = POST to the function's `/api/predict`; `azure-blob` = fire-and-forget upload to the function's `uploads` container |
 | `AZURE_PREDICT_URL` | yes when `SEND_MODE=azure` | — | sender | Azure Function predict endpoint — note: **Flex Consumption apps use a unique default domain** shown in the portal (e.g. `https://<name>-<hash>.<region>.azurewebsites.net/api/predict`), not `<name>.azurewebsites.net` |
-| `AZURE_STORAGE_CONNECTION_STRING` | yes when `SEND_MODE=azure-blob` | — | sender | storage account connection string of the function app |
+| `AZURE_STORAGE_CONNECTION_STRING` | yes when `SEND_MODE=azure-blob` | — | sender | storage account connection string of the function app (account-key based — requires "Allow storage account key access" enabled on the account, see section 3) |
 | `AZURE_UPLOAD_CONTAINER` | no | `uploads` | sender | input container watched by the `analyze_image` blob trigger |
 
 Exported environment variables always override `deploy.env` values.
@@ -217,24 +221,36 @@ Tuning constants at the top of `sender/sender.py`:
 
 ### Azure modes (optional)
 
-Two `SEND_MODE` values reroute frames from the VM server to the Azure Function (section 3):
+Two `SEND_MODE` values reroute frames from the VM server to the Azure Function (section 3). Both end up writing the same cloud records (`results/analysis.csv` + `results/processed_*.jpg`); they differ in how the frame travels and where the results show up.
+
+**`SEND_MODE=azure` — HTTP request/response, full local parity**
 
 ```bash
 SEND_MODE=azure
 AZURE_PREDICT_URL=https://<default-domain>/api/predict
 ```
 
+- The sender POSTs the frame as multipart (`file` field) to the function's `/api/predict` — the same request the VM server's `/predict` accepts — and gets back the identical server-format JSON: `detections`, `persons`, `inference_ms`, `response_ms`.
+- Because the response comes back synchronously, the sender keeps all local behavior: green boxes on the frame, `database.csv` rows, `processed_frame.jpg`, live dashboard.
+- The function records each request in the cloud as well: one CSV row (blob name `predict_<timestamp>.jpg`) plus the annotated image in the `results` container.
+- No storage credentials needed on the sender — plain HTTPS to an anonymous endpoint.
+- Latency: the first request after a cold start pays the torch import + YOLO load (5–15 s on Flex); later requests are ~1 s or less.
+
 On the Flex Consumption plan the default domain is unique per app (`<name>-<hash>.<region>.azurewebsites.net`) — copy it from the function app's Overview page in the portal.
 
-`azure` — the function's `/api/predict` accepts the same multipart upload and returns the same JSON as the VM server's `/predict`, so the sender keeps its full local behavior: green boxes on the frame, `database.csv` rows, `processed_frame.jpg`, and the local dashboard. Each request is also recorded by the function into the `results` container.
+**`SEND_MODE=azure-blob` — fire-and-forget upload**
 
 ```bash
 SEND_MODE=azure-blob
-AZURE_STORAGE_CONNECTION_STRING=<function-app-storage-account-connection-string>
+AZURE_STORAGE_CONNECTION_STRING=<storage-account-connection-string>
 # AZURE_UPLOAD_CONTAINER=uploads
 ```
 
-`azure-blob` — fire-and-forget: each frame is uploaded to the `uploads` container as `frame_YYYYMMDD_HHMMSS_<microseconds>.jpg` (container auto-created if missing), and the `analyze_image` blob trigger does the rest. Results exist only in the cloud (`results` container), so the sender skips the local draw/CSV/frame steps and the local dashboard stays empty.
+- Each frame is uploaded to the `uploads` container as `frame_YYYYMMDD_HHMMSS_<microseconds>.jpg` (container auto-created if missing) and the sender moves on immediately — no response is awaited.
+- The `analyze_image` blob trigger picks the blob up — typically within seconds, up to about a minute — and runs the same detect → CSV → annotated-image pipeline.
+- Results exist **only in the cloud** (`results` container): the sender skips the local draw/CSV/frame steps and the local dashboard stays empty.
+- The connection string is account-key based, so the storage account must have key access enabled (see "Storage & containers" in section 3 — the Flex application-storage flow disables it by default).
+- The blob trigger needs **Always ready instances ≥ 1** on the function app (portal → Scale) — non-HTTP triggers don't fire reliably from a zero-instance Flex app.
 
 ### Local dashboard
 
@@ -249,19 +265,19 @@ Note: the camera is a single-client MJPEG server — while the sender is running
 Serverless alternative to the VM server: images uploaded to Azure Storage are analyzed by the **same YOLOv8n model as the server** (`detection.py` mirrors `server/detection.py`) — no GPU VM, no Docker, scale-to-zero. The Azure Vision (Image Analysis 4.0) implementation is kept commented in the code for reference.
 
 ```
-uploads/ container (image upload)
-        │
-        ▼
-azure-function (blob trigger analyze_image)
-        │
-        ├── YOLOv8n inference (same model as the server, ultralytics)
-        ├── results/analysis.csv          # one row per image, header written once
-        └── results/processed_<name>.jpg   # image with detection boxes drawn
+blob upload to uploads/             POST /api/predict (multipart `file` / raw body)
+        │                                         │
+        ▼                                         ▼
+analyze_image (blob trigger)              predict (HTTP function)
+        └────────────────────┬────────────────────┘
+                               ▼
+                  YOLOv8n inference (same model as the server)
+                               │
+                               ├── results/analysis.csv          # one row per image, header written once
+                               └── results/processed_<name>.jpg  # image with detection boxes drawn
 ```
 
-Detection runs the **same YOLO model as the server** (`detection.py` mirrors `server/detection.py`, weights `yolov8n.pt`, auto-downloaded on first run). The Azure AI Vision (Image Analysis 4.0) code is kept commented in `analysis.py` / `processed_image.py` for reference — uncomment it to switch back.
-
-Input images come from any upload into the `uploads` container — e.g. Storage Explorer or `az storage blob upload` — or from the sender in `SEND_MODE=azure` (section 2), which POSTs to `/api/predict` instead.
+Detection runs the **same YOLO model as the server** (`detection.py` mirrors `server/detection.py`, weights `yolov8n.pt` — bundled into the deployment package by CI, auto-downloaded locally on first run). The Azure AI Vision (Image Analysis 4.0) code is kept commented in `analysis.py` / `processed_image.py` for reference — uncomment it to switch back.
 
 ### Functions
 
@@ -286,7 +302,7 @@ timestamp_utc,persons,detections,avg_confidence,inference_ms,response_ms,image_b
 ### Local development
 
 ```bash
-cd azure-function && uv sync && uv run pytest   # 30 tests, no network needed
+cd azure-function && uv sync && uv run pytest   # 34 tests, no network needed
 docker run -d -p 10000:10000 mcr.microsoft.com/azure-storage/azurite azurite-blob --blobHost 0.0.0.0
 func start
 ```
@@ -295,19 +311,39 @@ func start
 
 ### Deploy (one-time)
 
+**1. Create the function app** — portal: Function App → Create, runtime **Python**, plan **Flex Consumption** (region e.g. `spaincentral`), and attach **application storage** during creation: this configures the identity-based `AzureWebJobsStorage__*` settings and grants the app's managed identity `Storage Blob Data Contributor` on the account. CLI equivalent:
+
 ```bash
-az group create --name rg-s1-function --location westeurope
-az storage account create --name <unique-storage-name> --resource-group rg-s1-function \
-  --location westeurope --sku Standard_LRS
-az functionapp create --name <app-name> --resource-group rg-s1-function \
-  --storage-account <unique-storage-name> --flexconsumption-location westeurope \
-  --runtime python --runtime-version 3.12 --functions-version 4
-az functionapp config appsettings set --name <app-name> --resource-group rg-s1-function \
-  --settings YOLO_WEIGHTS=yolov8n.pt RESULTS_CONTAINER_NAME=results RESULTS_CSV_NAME=analysis.csv
-az storage container create --name uploads --account-name <unique-storage-name>
-az storage container create --name results --account-name <unique-storage-name>
-func azure functionapp publish <app-name>
+az group create --name Aiia --location spaincentral
+az functionapp create --name aiiafunctionapp --resource-group Aiia \
+  --flexconsumption-location spaincentral --runtime python --runtime-version 3.13 \
+  --functions-version 4
 ```
+
+**2. App settings** (weights + results location):
+
+```bash
+az functionapp config appsettings set --name aiiafunctionapp --resource-group Aiia \
+  --settings YOLO_WEIGHTS=yolov8n.pt RESULTS_CONTAINER_NAME=results RESULTS_CSV_NAME=analysis.csv
+```
+
+**3. Storage & containers** (account `aiia8996` in this deployment). The pipeline uses two containers: `uploads` (trigger input) and `results` (CSV + annotated images); the `azure-webjobs-*` / `app-package-*` containers belong to the platform — leave them alone. Flex application-storage accounts are created with **shared key access disabled** (identity-only), which is fine for the function itself:
+
+```bash
+# ad-hoc az storage commands work with your AAD identity:
+az storage container create --name uploads --account-name aiia8996 --auth-mode login
+az storage container create --name results --account-name aiia8996 --auth-mode login
+
+# only needed for the sender's azure-blob mode (account-key connection string):
+az storage account update --name aiia8996 --resource-group Aiia --allow-shared-key-access true
+CONN=$(az storage account show-connection-string --name aiia8996 --resource-group Aiia -o tsv)
+```
+
+`results` is also auto-created by the function on first write; `uploads` must exist before blob-trigger traffic starts (the sender auto-creates it too, once key auth works).
+
+**4. Always-ready instance** (blob-trigger mode only) — set **Always ready instances = 1** (portal → function app → Scale). Non-HTTP triggers don't fire reliably from a zero-instance Flex app; one 2048 MB always-ready instance costs ~$2/month.
+
+**5. Deploy** — handled by CI/CD (below); `func azure functionapp publish aiiafunctionapp` from Core Tools works as a manual alternative.
 
 Settings (managed in `local.settings.json` locally, app settings in Azure):
 
@@ -321,8 +357,10 @@ Settings (managed in `local.settings.json` locally, app settings in Azure):
 
 Deployment notes:
 
-- **Plan**: PyTorch + ultralytics exceed the 500 MB app size limit of the classic Consumption plan — use **Flex Consumption** (as above) or Premium, not `--consumption-plan-location`.
-- **CI/CD** (`.github/workflows/deploy-azure-function.yml`): runs the test suite, then vendors dependencies into `.python_packages/` with **CPU-only torch** (`requirements.txt` pins `torch==…+cpu` — plain Linux torch would pull CUDA libs and add gigabytes), bundles `yolov8n.pt`, and deploys the zip via `functions-action`. Flex Consumption restricts the Kudu settings API, so remote build (`SCM_DO_BUILD_DURING_DEPLOYMENT`) can't be toggled there — hence the vendored package.
+- **Plan**: PyTorch + ultralytics exceed the 500 MB app size limit of the classic Consumption plan — use **Flex Consumption** or Premium, not `--consumption-plan-location`.
+- **CI/CD** (`.github/workflows/deploy-azure-function.yml`): on push to `main` touching `azure-function/**` → runs the test suite (uv) → vendors dependencies with `pip --target .python_packages/lib/site-packages` — the **Flex layout**, which has no `python3.x` path segment, unlike classic plans — using the **CPU-only torch** pins from `requirements.txt` (plain Linux torch would pull CUDA libs and add gigabytes; the `+cpu` wheels are Linux/Windows-only, so that file only resolves on the Linux runner) → downloads `yolov8n.pt` into the package → deploys the zip via `functions-action` with **`sku: flexconsumption`** (required for publish-profile auth on Flex — without it the action calls the classic Kudu `zipdeploy`, which Flex doesn't support, and fails with `502 Bad Gateway`). `ultralytics` is pinned to the tested version: unpinned, pip can backtrack to a legacy release with a different package layout under wheel-only constraints.
+- **CI/CD auth**: the publish profile lives in the `AZURE_FUNCTIONAPP_PUBLISH_PROFILE` secret of the GitHub **environment** `AIIA_S1_ENV` (the workflow job declares `environment: AIIA_S1_ENV`, which is what makes environment secrets visible to it). SCM basic auth must be enabled on the app (`basicPublishingCredentialsPolicies` → `scm`), and the secret must contain a **freshly downloaded** profile — a profile downloaded while basic auth was disabled keeps failing with `401` even after the policy is re-enabled.
+- **Python version**: the workflow's `PYTHON_VERSION` must match the app's worker runtime (`FUNCTIONS_WORKER_RUNTIME_VERSION`, 3.13 here) so the vendored cp313 wheels line up with the interpreter on Azure.
 - **Storage auth**: with identity-based storage the function app's managed identity needs `Storage Blob Data Contributor` on the account — the portal assigns this when you attach application storage during creation.
 - The Azure AI Vision resource is no longer needed; create one (ComputerVision, `F0`) only if you re-enable the commented vision path. Microsoft announced Image Analysis 4.0 retirement for September 2028.
 
@@ -356,10 +394,11 @@ YOLO_API_URL=http://127.0.0.1:8000/predict uv run python sender.py
 ## 5. Full workflow
 
 1. Provision the Azure VM and open port 80 (once).
-2. Commit and push code changes to Git.
-3. `./deploy.sh` — deploy or update the server.
-4. `cd sender && uv run python sender.py` — start collecting counts.
-5. Open `sender/index.html` locally, and `http://<VM_PUBLIC_IP>/` for the public dashboard and metrics.
+2. *(optional, serverless mode)* Set up the Azure Function, its containers and the CI/CD secret (section 3), then pick a `SEND_MODE` in `deploy.env` (section 2).
+3. Commit and push code changes to Git — pushing `azure-function/**` also redeploys the function via GitHub Actions.
+4. `./deploy.sh` — deploy or update the server.
+5. `cd sender && uv run python sender.py` — start collecting counts.
+6. Open `sender/index.html` locally, and `http://<VM_PUBLIC_IP>/` for the public dashboard and metrics. In `azure-blob` mode check the `results` container in the storage account instead — the local dashboard stays empty.
 
 ---
 
@@ -373,3 +412,9 @@ YOLO_API_URL=http://127.0.0.1:8000/predict uv run python sender.py
 | Sender hangs with no output | camera allows only one client, or stream slow to start | close other consumers of the stream; first frames may take a few seconds |
 | `Unit apache2.service could not be found` in deploy output | expected after Apache was removed | harmless |
 | Dashboard `database.csv` chart empty | sender not running or no rows yet | start the sender; the chart skips the CSV header row |
+| CI deploy fails with `502 Bad Gateway` at zipdeploy | `functions-action` used the classic Kudu zipdeploy, unsupported on Flex | keep `sku: flexconsumption` on the deploy step |
+| CI deploy fails with `401` fetching Kudu settings | stale publish profile (downloaded while SCM basic auth was disabled) | re-enable basic auth, re-download the profile, update the GitHub secret |
+| `ModuleNotFoundError` on Azure (e.g. `cv2`) but tests pass locally | dependencies missing from the package or in the wrong path | deps must be vendored into `.python_packages/lib/site-packages` (Flex layout, no `python3.x` segment) before the deploy step |
+| `No module named 'pkg_resources'` + old ultralytics layout in Azure logs | pip resolved a legacy `ultralytics` release instead of 8.4.x | `ultralytics` is pinned in `requirements.txt` — keep it pinned |
+| `KeyBasedAuthenticationNotPermitted` from `az storage` commands | shared key access disabled on the account (Flex default) | use `--auth-mode login` for az commands; enable keys only for the sender's `azure-blob` mode |
+| Blob uploads sit unprocessed | zero always-ready instances — the blob trigger doesn't fire on a cold Flex app | set Always ready instances ≥ 1 (portal → Scale) |
