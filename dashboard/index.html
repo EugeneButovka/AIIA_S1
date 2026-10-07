@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Person Detection — Azure Results Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <style>
+        body { font-family: -apple-system, sans-serif; margin: 24px; background: #f5f6f8; color: #222; }
+        h1 { font-size: 22px; }
+        .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 24px; }
+        .card { background: #fff; border-radius: 10px; padding: 14px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+        .card .label { font-size: 12px; color: #777; text-transform: uppercase; }
+        .card .value { font-size: 22px; font-weight: 600; margin-top: 4px; }
+        .chart-box { background: #fff; border-radius: 10px; padding: 16px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+        .chart-box h2 { font-size: 15px; margin-top: 0; }
+        #status { font-size: 13px; color: #777; margin-bottom: 16px; }
+        #error { display: none; background: #fdecea; border: 1px solid #f5c6cb; color: #87211a; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; font-size: 14px; }
+    </style>
+</head>
+<body>
+    <h1>Person Detection — Azure Results Dashboard</h1>
+    <div id="error"></div>
+    <div id="status">Loading…</div>
+    <div class="cards" id="cards"></div>
+
+    <div class="chart-box">
+        <h2>Histogram of person counts per image</h2>
+        <canvas id="histogram" height="140"></canvas>
+    </div>
+
+    <div class="chart-box">
+        <h2>Persons over time (UTC)</h2>
+        <canvas id="personsChart" height="140"></canvas>
+    </div>
+
+    <div class="chart-box">
+        <h2>Average detection confidence over time (UTC)</h2>
+        <canvas id="confidenceChart" height="140"></canvas>
+    </div>
+
+    <div class="chart-box">
+        <h2>Inference and response time over time (UTC)</h2>
+        <canvas id="timingChart" height="140"></canvas>
+    </div>
+
+<script>
+// replace <STORAGE_ACCOUNT> with the function app's storage account before uploading:
+const CSV_URL = "https://<STORAGE_ACCOUNT>.blob.core.windows.net/results/analysis.csv";
+const REFRESH_MS = 15000;
+const TIMELINE_POINTS = 120;
+
+let charts = {};
+
+function parseCsv(text) {
+    const rows = [];
+    let field = "";
+    let row = [];
+    let inQuotes = false;
+    for (let i = 0; i < text.length; i++) {
+        const char = text[i];
+        if (inQuotes) {
+            if (char === '"') {
+                if (text[i + 1] === '"') { field += '"'; i++; }
+                else { inQuotes = false; }
+            } else { field += char; }
+        } else if (char === '"') {
+            inQuotes = true;
+        } else if (char === ',') {
+            row.push(field); field = "";
+        } else if (char === '\n') {
+            row.push(field.replace(/\r$/, "")); field = "";
+            if (row.length > 1 || row[0] !== "") rows.push(row);
+            row = [];
+        } else {
+            field += char;
+        }
+    }
+    if (field !== "" || row.length > 0) { row.push(field.replace(/\r$/, "")); rows.push(row); }
+    return rows;
+}
+
+function rowsToRecords(rows) {
+    if (rows.length < 2) return [];
+    const columns = {};
+    rows[0].forEach((name, index) => { columns[name.trim()] = index; });
+    const records = [];
+    for (let i = 1; i < rows.length; i++) {
+        const row = rows[i];
+        const get = (name) => (columns[name] === undefined ? null : row[columns[name]]);
+        const timestamp = get("timestamp_utc");
+        if (!timestamp) continue;
+        records.push({
+            timestamp: timestamp,
+            persons: Number(get("persons")) || 0,
+            detections: Number(get("detections")) || 0,
+            avg_confidence: Number(get("avg_confidence")) || 0,
+            inference_ms: Number(get("inference_ms")) || 0,
+            response_ms: Number(get("response_ms")) || 0,
+            blob_name: get("blob_name") || "",
+        });
+    }
+    records.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    return records;
+}
+
+function mean(values) {
+    if (!values.length) return 0;
+    return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function fmtMs(value) { return Math.round(value) + " ms"; }
+
+function renderCards(records) {
+    const personsTotal = records.reduce((sum, record) => sum + record.persons, 0);
+    const peakPersons = records.reduce((peak, record) => Math.max(peak, record.persons), 0);
+    const withPersons = records.filter(record => record.persons > 0).length;
+    const withDetections = records.filter(record => record.detections > 0);
+    const cards = [
+        ["Images processed", records.length],
+        ["Persons total", personsTotal],
+        ["Peak persons", peakPersons],
+        ["Frames with persons", withPersons + " (" + (records.length ? Math.round(100 * withPersons / records.length) : 0) + "%)"],
+        ["Avg inference", fmtMs(mean(records.map(record => record.inference_ms)))],
+        ["Avg response", fmtMs(mean(records.map(record => record.response_ms)))],
+        ["Avg confidence", (mean(withDetections.map(record => record.avg_confidence))).toFixed(4)],
+        ["Detections / image", mean(records.map(record => record.detections)).toFixed(2)],
+    ];
+    document.getElementById("cards").innerHTML = cards
+        .map(([label, value]) => '<div class="card"><div class="label">' + label + '</div><div class="value">' + value + '</div></div>')
+        .join('');
+}
+
+function renderHistogram(records) {
+    const maxPersons = records.reduce((peak, record) => Math.max(peak, record.persons), 0);
+    const buckets = {};
+    for (let count = 0; count <= Math.max(1, maxPersons); count++) buckets[count] = 0;
+    records.forEach(record => { buckets[record.persons] = (buckets[record.persons] || 0) + 1; });
+    const labels = Object.keys(buckets);
+    if (charts.histogram) charts.histogram.destroy();
+    charts.histogram = new Chart(document.getElementById("histogram"), {
+        type: "bar",
+        data: { labels: labels, datasets: [{ label: "Images", data: labels.map(key => buckets[key]), backgroundColor: "rgba(75, 192, 192, .6)" }] },
+        options: { responsive: true, animation: false, scales: { y: { beginAtZero: true } } }
+    });
+}
+
+function timelineLabels(records) {
+    return records.map(record => record.timestamp.slice(11, 19));
+}
+
+function renderPersonsChart(records) {
+    const recent = records.slice(-TIMELINE_POINTS);
+    if (charts.persons) charts.persons.destroy();
+    charts.persons = new Chart(document.getElementById("personsChart"), {
+        type: "line",
+        data: {
+            labels: timelineLabels(recent),
+            datasets: [{
+                label: "Persons",
+                data: recent.map(record => record.persons),
+                borderColor: "rgba(75, 110, 192, 1)",
+                borderWidth: 2,
+                fill: false,
+                spanGaps: true,
+            }]
+        },
+        options: { responsive: true, animation: false, scales: { y: { beginAtZero: true } } }
+    });
+}
+
+function renderConfidenceChart(records) {
+    const recent = records.slice(-TIMELINE_POINTS);
+    if (charts.confidence) charts.confidence.destroy();
+    charts.confidence = new Chart(document.getElementById("confidenceChart"), {
+        type: "line",
+        data: {
+            labels: timelineLabels(recent),
+            datasets: [{
+                label: "Avg confidence",
+                data: recent.map(record => record.detections > 0 ? record.avg_confidence : null),
+                borderColor: "rgba(227, 162, 37, 1)",
+                borderWidth: 2,
+                fill: false,
+                spanGaps: true,
+            }]
+        },
+        options: { responsive: true, animation: false, scales: { y: { beginAtZero: true, suggestedMax: 1 } } }
+    });
+}
+
+function renderTimingChart(records) {
+    const recent = records.slice(-TIMELINE_POINTS);
+    if (charts.timing) charts.timing.destroy();
+    charts.timing = new Chart(document.getElementById("timingChart"), {
+        type: "line",
+        data: {
+            labels: timelineLabels(recent),
+            datasets: [
+                { label: "Inference ms", data: recent.map(record => record.inference_ms), borderColor: "rgba(217, 83, 79, 1)", borderWidth: 2, fill: false },
+                { label: "Response ms", data: recent.map(record => record.response_ms), borderColor: "rgba(91, 192, 122, 1)", borderWidth: 2, fill: false },
+            ]
+        },
+        options: { responsive: true, animation: false, scales: { y: { beginAtZero: true } } }
+    });
+}
+
+function showError(message) {
+    const element = document.getElementById("error");
+    element.style.display = "block";
+    element.textContent = message;
+}
+
+async function refresh() {
+    try {
+        const response = await fetch(CSV_URL + "?t=" + Date.now(), { cache: "no-store" });
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        const records = rowsToRecords(parseCsv(await response.text()));
+        document.getElementById("error").style.display = "none";
+        if (!records.length) {
+            document.getElementById("status").textContent = "No rows in the CSV yet — waiting for the first analysis.";
+            return;
+        }
+        renderCards(records);
+        renderHistogram(records);
+        renderPersonsChart(records);
+        renderConfidenceChart(records);
+        renderTimingChart(records);
+        document.getElementById("status").textContent =
+            "Updated " + new Date().toLocaleTimeString() + " — " + records.length + " rows, " +
+            records[0].timestamp.slice(0, 19).replace("T", " ") + " → " + records[records.length - 1].timestamp.slice(0, 19).replace("T", " ") + " UTC";
+    } catch (error) {
+        document.getElementById("status").textContent = "Fetch failed.";
+        showError("Could not load " + CSV_URL + " (" + error.message + "). " +
+            "Check that the results container allows anonymous blob read and that the storage account has a CORS rule allowing GET from this site's origin.");
+    }
+}
+
+refresh();
+setInterval(refresh, REFRESH_MS);
+</script>
+</body>
+</html>
