@@ -308,18 +308,23 @@ Excel note: `timestamp_utc` is ISO-8601 UTC with microseconds (e.g. `2026-10-06T
 
 `dashboard/index.html` is a standalone page that renders the cloud results CSV (`results/analysis.csv`) the same way the VM dashboard does — cards, person-count histogram, persons/confidence/timing timelines — excluding server-only stats (CPU, memory, bandwidth, cost, uptime). It is hosted through the **Static website** feature of a storage account (separate from the function's storage account): enable Static website in that account's portal blade (index document `index.html`), which creates its `$web` container and a public endpoint like `https://<web-account>.z43.web.core.windows.net/`.
 
-The page fetches the CSV directly from the function's storage account in the browser, which needs two one-time settings there — anonymous read on the `results` container and a CORS rule for the GET method:
+The page fetches the CSV directly from the function's storage account in the browser, which needs two one-time settings there — anonymous read on the `results` container and a CORS rule for the GET method. Note: `az storage container set-permission` supports key auth only (`--auth-mode login` is rejected), so these use the connection string (shared key access is already enabled for the sender — see above); the portal works too (Containers → `results` → Change access level → *Blob*):
 
 ```bash
 az storage account update --name <STORAGE_ACCOUNT> --resource-group <RESOURCE_GROUP> --allow-blob-public-access true
-az storage container set-permission --name results --account-name <STORAGE_ACCOUNT> --public-access blob --auth-mode login
-az storage cors add --account-name <STORAGE_ACCOUNT> --services b --methods GET --origins "*" --allowed-headers "*" --exposed-headers "*" --max-age 3600
+CONN=$(az storage account show-connection-string --name <STORAGE_ACCOUNT> --resource-group <RESOURCE_GROUP> -o tsv)
+az storage container set-permission --name results --account-name <STORAGE_ACCOUNT> --public-access blob --connection-string "$CONN"
+az storage cors add --account-name <STORAGE_ACCOUNT> --services b --methods GET --origins "*" --allowed-headers "*" --exposed-headers "*" --max-age 3600 --connection-string "$CONN"
 ```
 
-Then set `CSV_URL` at the top of `dashboard/index.html` to `https://<STORAGE_ACCOUNT>.blob.core.windows.net/results/analysis.csv` (keep the local change out of the public repo — the committed file carries the placeholder) and upload:
+The committed page carries a `<STORAGE_ACCOUNT>` placeholder in `CSV_URL` — substitute it at upload time (keeps the real name out of the public repo):
 
 ```bash
-az storage blob upload --account-name <WEB_ACCOUNT> --auth-mode login -c '$web' -n index.html -f dashboard/index.html
+sed 's|<STORAGE_ACCOUNT>|YOUR_ACCOUNT_NAME|g' dashboard/index.html > /tmp/index.html
+```
+
+```bash
+az storage blob upload --account-name <WEB_ACCOUNT> --auth-mode login -c '$web' -n index.html -f /tmp/index.html
 ```
 
 The page auto-refreshes every 15 s, maps columns by header name (tolerant to the schema change history), and shows a hint banner if the fetch fails (missing public access or CORS). Note: anonymous read exposes the CSV and the processed images to anyone holding the container URL — acceptable for this demo since the function's HTTP endpoints are anonymous anyway; use a SAS token in `CSV_URL` instead if you ever want the results private.

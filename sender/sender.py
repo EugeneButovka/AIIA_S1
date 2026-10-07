@@ -22,7 +22,8 @@ AZURE_BLOB_MODE = "azure-blob"
 OUTPUT_DIR = Path(__file__).resolve().parent
 DEPLOY_ENV_FILE = OUTPUT_DIR.parent / "deploy.env"
 
-STREAM_URL = os.environ.get("STREAM_URL", "http://47.181.86.62:8082/mjpg/video.mjpg")
+# STREAM_URL = os.environ.get("STREAM_URL", "http://47.181.86.62:8082/mjpg/video.mjpg") # main variant
+STREAM_URL = os.environ.get("STREAM_URL", "http://79.3.91.147:9002/mjpg/video.mjpg")
 
 
 def load_deploy_env():
