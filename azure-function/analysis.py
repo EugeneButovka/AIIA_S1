@@ -124,6 +124,13 @@ def process_prediction(blob_name: str, image_data: bytes, result: DetectionResul
 
 
 def analyze_blob(blob_name: str, image_data: bytes) -> None:
+    if not blob_name.startswith("uploads/"):
+        logger.warning(
+            "skipped %s: outside the uploads container — check the Event Grid subscription "
+            "subject filter, it must be limited to /blobServices/default/containers/uploads/blobs/",
+            blob_name,
+        )
+        return
     started_at = time.perf_counter()
     # client = build_client()
     # analyze_started_at = time.perf_counter()

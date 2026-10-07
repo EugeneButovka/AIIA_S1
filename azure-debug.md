@@ -20,6 +20,13 @@ Portal alternative: function app → **Log stream**, read the lines after `An un
 az eventgrid event-subscription list --source-resource-id "/subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<RESOURCE_GROUP>/providers/Microsoft.Storage/storageAccounts/<STORAGE_ACCOUNT>" -o table
 ```
 
+The subscription **must** filter the subject to the uploads container — without it, every write to `results` re-triggers the function (`processed_processed_…` feedback loop). Delete and recreate it with the filter:
+
+```bash
+az eventgrid event-subscription delete --name <SUB_NAME> --source-resource-id "/subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<RESOURCE_GROUP>/providers/Microsoft.Storage/storageAccounts/<STORAGE_ACCOUNT>"
+az eventgrid event-subscription create --name <SUB_NAME> --source-resource-id "/subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<RESOURCE_GROUP>/providers/Microsoft.Storage/storageAccounts/<STORAGE_ACCOUNT>" --endpoint-type webhook --endpoint "https://<APP_DOMAIN>/runtime/webhooks/blobs?functionName=Host.Functions.analyze_image&code=<blobs_extension key>" --included-event-types Microsoft.Storage.BlobCreated --subject-begins-with "/blobServices/default/containers/uploads/blobs/"
+```
+
 Resource provider status / registration (required before event subscriptions can exist):
 
 ```bash
@@ -58,6 +65,7 @@ https://<APP_DOMAIN>/runtime/webhooks/blobs?functionName=Host.Functions.analyze_
 | Blob trigger never invoked, zero invocations | Flex does not run polling-based blob triggers — must be `source="EventGrid"` |
 | Old blobs never processed | Blob triggers (Event Grid) only fire on blobs created after the trigger exists |
 | 403 `AuthorizationPermissionMismatch` from `Windows-Azure-Queue` in App Insights | App identity lacks the **queue** data role — the Event Grid blob trigger uses the Queue service internally; host crash-loops at startup |
+| `results` fills with `processed_processed_…` blobs | event subscription has no subject filter — the function re-triggers on its own `results` writes (feedback loop) | recreate the subscription with `--subject-begins-with "/blobServices/default/containers/uploads/blobs/"`, then wipe `results` |
 
 ## Identity roles for identity-based storage (AzureWebJobsStorage__*)
 

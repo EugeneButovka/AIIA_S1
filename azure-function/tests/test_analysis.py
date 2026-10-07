@@ -160,3 +160,18 @@ def test_analyze_blob_skips_invalid_image(monkeypatch):
     assert appended == []
     assert uploaded == []
     assert drawn == []
+
+
+def test_analyze_blob_ignores_blobs_outside_uploads_container(monkeypatch):
+    # given
+    detector = FakeDetector(result=build_result())
+    appended, uploaded, drawn = install_pipeline(monkeypatch, detector)
+
+    # when
+    analyze_blob("results/processed_frame.jpg", b"image-bytes")
+
+    # then
+    assert detector.calls == []
+    assert appended == []
+    assert uploaded == []
+    assert drawn == []

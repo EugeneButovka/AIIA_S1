@@ -300,6 +300,8 @@ timestamp_utc,persons,detections,avg_confidence,inference_ms,response_ms,image_b
 
 `persons` counts person-class detections with confidence ≥ 0.5 (same threshold as server and sender). Annotated images mirror the sender: green boxes around detected persons, thickness 2.
 
+`blob_name` records the row's source: `uploads/<frame>.jpg` for blob-trigger rows (the literal trigger path), `predict_<timestamp>.jpg` for HTTP rows — there is no source blob in that case, so a synthetic name marks the request. The annotated image name is derived from it either way: `processed_<stem>.jpg`.
+
 Excel note: `timestamp_utc` is ISO-8601 UTC with microseconds (e.g. `2026-10-06T15:47:01.625321+00:00`) and decimals use dots — open the CSV via Excel's *Data → From Text/CSV* import (comma delimiter, dot decimal) rather than double-clicking the file, or the locale may mangle timestamps and shift columns.
 
 ### Local development
@@ -344,11 +346,20 @@ CONN=$(az storage account show-connection-string --name <STORAGE_ACCOUNT> --reso
 
 `results` is also auto-created by the function on first write; `uploads` must exist before blob-trigger traffic starts (the sender auto-creates it too, once key auth works).
 
+To clean all blobs out of either container (e.g. clearing accumulated frames or starting the results history fresh — deleting `analysis.csv` is safe, the function re-writes the header on the next row):
+
+```bash
+az storage blob delete-batch --source uploads --account-name <STORAGE_ACCOUNT> --auth-mode login
+az storage blob delete-batch --source results --account-name <STORAGE_ACCOUNT> --auth-mode login
+```
+
+Deleting a single blob: `az storage blob delete --container-name uploads --name <blob> --account-name <STORAGE_ACCOUNT> --auth-mode login` (or the portal container browser, which works once you have `Storage Blob Data Contributor` on the account).
+
 **4. Blob trigger wiring** (blob-trigger mode only). Flex Consumption runs **only the event-based (Event Grid) blob trigger** — the default polling trigger silently never fires (it's declared as `source="EventGrid"` on the `@app.blob_trigger` decorator in `function_app.py`). One-time setup:
 
 - **Always ready instances = 1** (portal → function app → Scale) — non-HTTP triggers don't fire reliably from a zero-instance Flex app; one 2048 MB always-ready instance costs ~$2/month.
 - Register the `Microsoft.EventGrid` resource provider on the subscription if it isn't already: `az provider register --namespace Microsoft.EventGrid`.
-- The **Event Grid event subscription** on the `uploads` container (event type *Blob Created*): Flex may auto-provision it on deploy; if not, create it manually — storage account → Events → + Event Subscription → Web Hook endpoint `https://<app-domain>/runtime/webhooks/blobs?functionName=Host.Functions.analyze_image&code=<blobs_extension key>` (key: portal → function app → Functions → App keys → System keys).
+- The **Event Grid event subscription** on the `uploads` container (event type *Blob Created*): Flex may auto-provision it on deploy; if not, create it manually — storage account → Events → + Event Subscription → Web Hook endpoint `https://<app-domain>/runtime/webhooks/blobs?functionName=Host.Functions.analyze_image&code=<blobs_extension key>` (key: portal → function app → Functions → App keys → System keys). **The subscription must filter the subject to `/blobServices/default/containers/uploads/blobs/`** (CLI: `--subject-begins-with`). Without the filter, every write the function makes to the `results` container raises its own BlobCreated event, which re-triggers the function → **infinite reprocessing feedback loop** (observed: 99 generations of `processed_processed_…` blobs per frame, hundreds of wasted YOLO executions). The function also refuses blobs outside `uploads/` as a second line of defense.
 - **Identity roles**: the portal's application-storage flow grants only `Storage Blob Data Contributor`, but the Event Grid blob trigger also uses the account's **Queue** service internally — without `Storage Queue Data Contributor` (and `Storage Table Data Contributor` for host bookkeeping) the function app **crash-loops at host startup** with `403 AuthorizationPermissionMismatch` from the Queue service. Grant both to the app's user-assigned identity (`az functionapp identity show` → `principalId`):
   ```bash
   az role assignment create --assignee-object-id <PRINCIPAL_ID> --assignee-principal-type ServicePrincipal --role "Storage Queue Data Contributor" --scope "/subscriptions/<sub>/resourceGroups/<RESOURCE_GROUP>/providers/Microsoft.Storage/storageAccounts/<STORAGE_ACCOUNT>"
@@ -439,3 +450,4 @@ Live-debug commands (App Insights queries, Event Grid subscription checks, healt
 | `KeyBasedAuthenticationNotPermitted` from `az storage` commands | shared key access disabled on the account (Flex default) | use `--auth-mode login` for az commands; enable keys only for the sender's `azure-blob` mode |
 | Blob uploads sit unprocessed | polling-based blob trigger (Flex runs only the Event Grid one), or zero always-ready instances, or missing event subscription | ensure `source="EventGrid"` on the trigger, Always ready instances ≥ 1, and the Blob Created event subscription exists (see §3 step 4) |
 | Function app 503s on everything, `An unhandled exception has occurred. Host is shutting down.` in App Insights right after host start | app identity lacks `Storage Queue Data Contributor` — the Event Grid blob trigger hits the Queue service at startup and 403s (`AuthorizationPermissionMismatch` from `Windows-Azure-Queue`) | grant the queue/table roles to the app identity, then restart (see §3 step 4) |
+| `results` fills with `processed_processed_…` blobs, CSV rows with `results/…` blob names | the event subscription has no subject filter — every write to `results` re-triggers the function (feedback loop) | add subject filter `/blobServices/default/containers/uploads/blobs/` to the subscription (see §3 step 4); clean `results` with `az storage blob delete-batch` |
