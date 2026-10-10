@@ -1,0 +1,56 @@
+name: aiia-docker-assignment
+
+services:
+  inference:
+    build:
+      context: ./inference
+      args:
+        TORCH_VERSION: "2.9.1"
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cpu
+        MODEL_ID: distilbert/distilbert-base-uncased-finetuned-sst-2-english
+    image: aiia/dl-inference:latest
+    container_name: aiia-inference
+    environment:
+      MODEL_ID: distilbert/distilbert-base-uncased-finetuned-sst-2-english
+    shm_size: 512m
+    deploy:
+      resources:
+        limits:
+          memory: 3g
+          cpus: "2.0"
+    ports:
+      - "8000:8000"
+    volumes:
+      - models:/models
+    networks:
+      - dl-net
+    restart: unless-stopped
+
+  gui:
+    build:
+      context: ./gui
+    image: aiia/dl-gui:latest
+    container_name: aiia-gui
+    environment:
+      INFERENCE_URL: http://inference:8000
+    shm_size: 256m
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: "1.0"
+    ports:
+      - "7860:7860"
+    depends_on:
+      inference:
+        condition: service_healthy
+    networks:
+      - dl-net
+    restart: unless-stopped
+
+networks:
+  dl-net:
+    driver: bridge
+
+volumes:
+  models:

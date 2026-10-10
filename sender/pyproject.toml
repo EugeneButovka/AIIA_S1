@@ -7,6 +7,7 @@ dependencies = [
     "opencv-python>=5.0.0.93",
     "requests>=2.32.0",
     "azure-storage-blob>=12.24.0",
+    "ipykernel>=6.31.0",
 ]
 
 [dependency-groups]
