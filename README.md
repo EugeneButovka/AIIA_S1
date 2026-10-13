@@ -41,6 +41,13 @@ The sender's local dashboard (annotated frame + person-count chart) is populated
 │   ├── cost.py           # Azure cost auto-resolution (IMDS + Retail Prices API)
 │   ├── static/index.html # public dashboard
 │   └── pyproject.toml
+├── benchmark/
+│   ├── loadgen.py        # multi-camera load generator: FrameHub + staggered camera workers, ramps levels
+│   ├── report.py         # per-level aggregation, processing-limit verdict, cost estimate, chart
+│   ├── helpers.py        # shared logic: percentile, saturation thresholds, Flex cost model
+│   ├── tests/            # pytest suite for the aggregation logic
+│   ├── README.md         # full benchmark reference: CLI flags, output schemas, cleanup
+│   └── pyproject.toml
 └── azure-function/
     ├── function_app.py    # hello (HTTP sample) + predict (HTTP, server format) + analyze_image (blob trigger)
     ├── detection.py       # YOLOv8n detector (mirrors server/detection.py)
@@ -54,11 +61,13 @@ The sender's local dashboard (annotated frame + person-count chart) is populated
 ## Quick start
 
 ```bash
-cp deploy.env.example deploy.env   # or create it manually — see the deploy.env section
+cp deploy.env.example deploy.env
 # edit deploy.env with your VM IP, SSH user and repo URL
-./deploy.sh                       # deploy the server to the VM
-cd sender && uv run python sender.py   # start collecting counts locally
+./deploy.sh
+cd sender && uv run python sender.py
 ```
+
+The last command starts collecting person counts locally.
 
 Requirements: Python 3.9+ with [uv](https://docs.astral.sh/uv/); an Azure Ubuntu VM with port 80 open.
 
@@ -186,9 +195,9 @@ Performance data mapping (Task 2.5):
 ```bash
 ssh <ssh-user>@<VM_PUBLIC_IP>
 cd ~/yolo-api
-docker compose ps          # status
-docker compose logs -f     # logs
-docker compose down        # stop
+docker compose ps
+docker compose logs -f
+docker compose down
 ```
 
 ---
@@ -332,7 +341,7 @@ The page auto-refreshes every 15 s, maps columns by header name (tolerant to the
 ### Local development
 
 ```bash
-cd azure-function && uv sync && uv run pytest   # 34 tests, no network needed
+cd azure-function && uv sync && uv run pytest
 docker run -d -p 10000:10000 mcr.microsoft.com/azure-storage/azurite azurite-blob --blobHost 0.0.0.0
 func start
 ```
@@ -445,7 +454,61 @@ YOLO_API_URL=http://127.0.0.1:8000/predict uv run python sender.py
 
 ---
 
-## 5. Full workflow
+## 5. Multi-camera load benchmark (Part 4)
+
+`benchmark/` answers two questions: how many simultaneous cameras can the **VM server** handle (Task 4.2 — CPU, memory, bandwidth, cost, response time) and how many can the **Azure Function** handle (Task 4.3 — detection efficiency, cost, response time).
+
+One real camera stream feeds all simulated cameras: the MJPEG server allows a single client, so a `FrameHub` thread keeps the latest frame in memory and every "camera" worker grabs a copy of it. Each camera sends one frame every `--interval` seconds (default 5, matching the sender's real cadence); workers are staggered so load spreads evenly within the interval. The generator ramps through camera counts (default `1,2,4,8,16,32,64`) and runs each level for `--per-level` seconds, writing raw CSVs per run into `benchmark/results/<run>/` (gitignored). Full CLI reference, output schemas and cleanup commands: [`benchmark/README.md`](benchmark/README.md).
+
+```bash
+cd benchmark
+uv sync
+uv run pytest
+```
+
+The last line runs the unit tests for the aggregation logic.
+
+Targets (`--target`):
+
+| Target | Sends | Requires | Collects |
+|---|---|---|---|
+| `dry` | nothing (encode only) | camera stream | frames.csv — smoke-test the pipeline |
+| `vm` | POST to the server `/predict` | `YOLO_API_URL` in `deploy.env` | frames.csv + vmstats.csv (polls `/stats` every `--stats-every` s: cpu, memory, bytes in/out, cost, uptime, requests) |
+| `azure` | POST to the function `/api/predict` | `AZURE_PREDICT_URL` in `deploy.env` | frames.csv (client latency from the load generator) |
+| `azure-blob` | upload to the `uploads` container | `AZURE_STORAGE_CONNECTION_STRING` in `deploy.env` | frames.csv (upload time only — processing happens asynchronously) |
+
+Task 4.2 — VM limit (default ramp 1–64 cameras, 5 minutes per level):
+
+```bash
+uv run python loadgen.py --target vm --cameras 1,2,4,8,16,32,64 --interval 5 --per-level 300
+uv run python report.py results/vm_<timestamp>
+```
+
+Task 4.3 — Cloud limit (HTTP mode measures end-to-end latency; blob mode measures ingest; both scale with the same camera ramp):
+
+```bash
+uv run python loadgen.py --target azure --cameras 1,2,4,8,16,32,64 --interval 5 --per-level 300
+uv run python loadgen.py --target azure-blob --cameras 1,2,4,8,16,32,64 --interval 5 --per-level 300
+az storage blob download --account-name <STORAGE_ACCOUNT> --container-name results --name analysis.csv --file analysis.csv --auth-mode login
+uv run python report.py results/azure_<timestamp> --cloud-csv analysis.csv
+```
+
+`report.py --cloud-csv` attributes analysis.csv rows to levels by timestamp window, so the blob-trigger run gets per-level cloud-side response/inference times, detections per frame and confidence. Cloud cost is estimated from Flex Consumption pricing (execution count + GB-seconds of compute, constants in `benchmark/helpers.py`); the VM's own cost comes straight from the server's `/stats` endpoint.
+
+Output of a run (all in `benchmark/results/<run>/`):
+
+| File | Contents |
+|---|---|
+| `frames.csv` | one row per frame sent: timestamp, level, camera, latency, status, detections, bytes |
+| `levels.csv` | level boundaries (start/end timestamps, cameras, frames sent) — used by `report.py` for cloud-row windowing |
+| `vmstats.csv` | `/stats` samples with the level they belong to (VM target only) |
+| `summary.csv`, `summary.png` | per-level aggregates and the processing-limit chart, written by `report.py` |
+
+A level counts as saturated when any of: error rate > 2%, p95 latency > 10 s, VM CPU > 95%, VM memory > 95% (thresholds adjustable via `report.py` flags `--error-threshold`, `--latency-threshold-ms`, `--cpu-threshold`, `--memory-threshold`). The verdict line prints the highest healthy camera count and what tripped at the next level. `Ctrl+C` stops early and writes partial results.
+
+---
+
+## 6. Full workflow
 
 1. Provision the Azure VM and open port 80 (once).
 2. *(optional, serverless mode)* Set up the Azure Function, its containers and the CI/CD secret (section 3), then pick a `SEND_MODE` in `deploy.env` (section 2).
@@ -456,7 +519,7 @@ YOLO_API_URL=http://127.0.0.1:8000/predict uv run python sender.py
 
 ---
 
-## 6. Troubleshooting
+## 7. Troubleshooting
 
 Live-debug commands (App Insights queries, Event Grid subscription checks, health probes, blob container inspection) are collected in [`azure-debug.md`](azure-debug.md), including a symptom → meaning table for the failure modes below.
 

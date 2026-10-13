@@ -1,0 +1,20 @@
+[project]
+name = "s1-benchmark"
+version = "0.1.0"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=2.0.2",
+    "opencv-python>=5.0.0.93",
+    "requests>=2.32.0",
+    "azure-storage-blob>=12.24.0",
+    "matplotlib>=3.9.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
