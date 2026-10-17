@@ -57,6 +57,12 @@ function renderCards(stats) {
     const cards = [
         ['Requests served', stats.requests],
         ['Persons total', stats.persons_total],
+    ];
+    if (stats.unique_persons !== undefined) {
+        cards.push(['Unique persons (session)', stats.unique_persons]);
+        cards.push(['Unique vehicles (session)', stats.unique_vehicles]);
+    }
+    cards.push(
         ['Avg response', stats.avg_response_ms + ' ms'],
         ['P95 response', stats.p95_response_ms + ' ms'],
         ['Avg inference', stats.avg_inference_ms + ' ms'],
@@ -71,7 +77,7 @@ function renderCards(stats) {
         ['Est. cost so far', '$' + stats.cost_total.toFixed(4)],
         ['Est. cost / month', '$' + stats.cost_per_month.toFixed(2)],
         ['Cost source', stats.cost_source],
-    ];
+    );
     document.getElementById('cards').innerHTML = cards
         .map(([label, value]) => '<div class="card"><div class="label">' + label + '</div><div class="value">' + value + '</div></div>')
         .join('');

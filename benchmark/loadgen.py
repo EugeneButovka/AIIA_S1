@@ -247,6 +247,14 @@ def run_benchmark(args):
     else:
         sender = build_dry_sender()
 
+    for _ in range(args.warmup):
+        frame = hub.grab()
+        if frame is not None:
+            sender("warmup", frame)
+        time.sleep(1)
+    if args.warmup:
+        print("[{}] warm-up: {} frame(s) sent".format(utc_now(), args.warmup))
+
     frames_rows = []
     stats_rows = []
     levels_rows = []
@@ -332,6 +340,7 @@ def build_parser():
     parser.add_argument("--per-level", dest="per_level", type=float, default=60.0, help="seconds to run each camera level")
     parser.add_argument("--pause", type=float, default=5.0, help="seconds to rest between levels")
     parser.add_argument("--stats-every", dest="stats_every", type=float, default=5.0, help="seconds between VM /stats polls")
+    parser.add_argument("--warmup", type=int, default=0, help="sequential warm-up frames sent before level 1 (discarded from results)")
     parser.add_argument("--stream", default="", help="MJPEG stream URL")
     parser.add_argument("--vm-url", dest="vm_url", default="", help="server /predict URL")
     parser.add_argument("--stats-url", dest="stats_url", default="", help="server /stats URL")

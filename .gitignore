@@ -30,3 +30,4 @@ database.csv
 server/data/
 azure-function/local.settings.json
 *.PublishSettings
+s1-detection-experiments.zip

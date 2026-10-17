@@ -44,6 +44,7 @@ uv run python loadgen.py --target vm --cameras 1,2,4,8,12 --interval 5 --per-lev
 | `--per-level` | `60.0` | seconds each level runs |
 | `--pause` | `5.0` | rest between levels |
 | `--stats-every` | `5.0` | `/stats` poll period (VM target) |
+| `--warmup` | `0` | sequential warm-up frames sent before level 1, discarded from results — recommended for the `azure` target, where the first requests pay the Flex cold start (15–25 s) and would otherwise contaminate level 1's percentiles |
 | `--stream` | `STREAM_URL` env | MJPEG stream URL |
 | `--vm-url` | `YOLO_API_URL` env | server `/predict` URL |
 | `--stats-url` | derived | server `/stats` URL — defaults to the `/predict` URL with `predict` replaced by `stats` |

@@ -8,3 +8,4 @@ services:
       - ./server/data:/app/data
     environment:
       - COST_PER_HOUR=${COST_PER_HOUR:-}
+      - DETECTION_MODULE=${DETECTION_MODULE:-legacy}

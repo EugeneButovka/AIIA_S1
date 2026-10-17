@@ -91,12 +91,15 @@ YOLO_API_URL=http://<azure-vm-public-ip>/predict
 | `VM_USER` | no | `azureuser` | `deploy.sh` | SSH user; deploys to that user home `yolo-api` folder on the VM |
 | `REMOTE_DIR` | no | `~/yolo-api` on the VM | `deploy.sh` | absolute path, `~`-relative, or bare name — resolved on the VM side |
 | `YOLO_API_URL` | no | placeholder | sender | `/predict` endpoint URL |
+| `DETECTION_MODULE` | no | `legacy` | server | `legacy` = YOLOv8n per-frame person counting; `tracking` = YOLO11n + ByteTrack module (unique persons/vehicles across frames, vehicle counting, `/calibrate`, `/reset`) |
 | `STREAM_URL` | no | hardcoded camera | sender | MJPEG camera stream URL |
 | `COST_PER_HOUR` | no | Azure auto-lookup | server | hourly rate override for cost estimation |
 | `SEND_MODE` | no | `server` | sender | `server` = POST to `YOLO_API_URL`; `azure` = POST to the function's `/api/predict`; `azure-blob` = fire-and-forget upload to the function's `uploads` container |
 | `AZURE_PREDICT_URL` | yes when `SEND_MODE=azure` | — | sender | Azure Function predict endpoint — note: **Flex Consumption apps use a unique default domain** shown in the portal (e.g. `https://<name>-<hash>.<region>.azurewebsites.net/api/predict`), not `<name>.azurewebsites.net` |
 | `AZURE_STORAGE_CONNECTION_STRING` | yes when `SEND_MODE=azure-blob` | — | sender | storage account connection string of the function app (account-key based — requires "Allow storage account key access" enabled on the account, see section 3) |
 | `AZURE_UPLOAD_CONTAINER` | no | `uploads` | sender | input container watched by the `analyze_image` blob trigger |
+| `SENDER_CALIBRATION` | no | `true` | sender | pick up the server's `/calibration` recommendation at startup and upload resized / re-compressed JPEGs (tracking module); `false` or a legacy server sends full-resolution frames |
+| `SENDER_RESET_ON_START` | no | `false` | sender | POST `/reset` before the first frame, zeroing the server's unique counters — off by default so a camera reboot can't silently wipe the counts |
 
 Exported environment variables always override `deploy.env` values.
 
@@ -150,6 +153,21 @@ curl -X POST -F "file=@some_image.jpg" http://<VM_PUBLIC_IP>/predict
 
 Interactive API docs: `http://<VM_PUBLIC_IP>/docs`.
 
+### Detection modules (config-driven)
+
+The server runs one of two detection modules, selected by the `DETECTION_MODULE` variable in `deploy.env` (docker-compose passes it to the container). Only the selected model is loaded at startup.
+
+| | `legacy` (default) | `tracking` |
+|---|---|---|
+| Detector | YOLOv8n, per-frame (`server/detection.py`) | YOLO11n + ByteTrack (`server/tracking.py`) |
+| `/predict` response | unchanged shape | adds `vehicles`, `unique_persons`, `unique_vehicles`, per-detection `track_id` |
+| Unique counting | — | same person/vehicle across frames counts once (cumulative per session, ≥ 2 consecutive confirmed frames gate) |
+| Extra endpoints | — | `POST /calibrate` (1–8 frames → resolution/quality ladder + recommendation, persisted), `GET /calibration`, `POST /reset` |
+| Weights | `yolov8n.pt` | `yolo11n.pt` (`TRACKING_WEIGHTS` env override) |
+| Tracker config | — | `server/trackers/bytetrack.yaml` (`fuse_score: False` — tuned for low-confidence scenes, see `experiments/REPORT.md`) |
+
+Switching is a redeploy away: set `DETECTION_MODULE=tracking` in `deploy.env` and run `./deploy.sh` again; remove the variable (or set `legacy`) to return to the current behaviour. The response for `legacy` mode is byte-for-byte the old payload, and the CSV schema only appends two new columns (`unique_persons`, `unique_vehicles`, empty in legacy mode; old-format files are rotated on first write).
+
 ### Results storage (CSV)
 
 Every prediction is appended to `server/data/results.csv` on the VM (mounted as a Docker volume — persists across container restarts and redeploys):
@@ -175,6 +193,9 @@ The server hosts a web dashboard at **`http://<VM_PUBLIC_IP>/`** (public IP, por
 | `GET /history` | recent per-request records (JSON) |
 | `GET /docs` | interactive OpenAPI docs |
 | `GET /` | dashboard page |
+| `POST /calibrate` | tracking module only: 1–8 frames → resolution/quality ladder + recommended send-parameters (JSON, persisted) |
+| `GET /calibration` | tracking module only: last calibration result (404 until one has been run) |
+| `POST /reset` | tracking module only: clear the unique person/vehicle counters (400 in legacy mode) |
 
 Performance data mapping (Task 2.5):
 
@@ -212,11 +233,13 @@ uv sync
 uv run python sender.py
 ```
 
-Configuration comes from `deploy.env` (`YOLO_API_URL`, optionally `STREAM_URL`) — no exports needed. Stop with `Ctrl+C`. Each cycle:
+Configuration comes from `deploy.env` (`YOLO_API_URL`, optionally `STREAM_URL`) — no exports needed. Stop with `Ctrl+C`.
+
+In `server` mode the sender first asks the server for its calibration (`GET /calibration`, tracking module only): if one exists it uploads each frame resized to the calibrated scale and re-encoded at the calibrated JPEG quality (~48% of full-res bytes in the live smoke); without one it sends full-resolution frames, unchanged from before. With `SENDER_RESET_ON_START=true` it also zeroes the server's unique counters before the first frame. Each cycle:
 
 1. reads a frame from the camera stream (prints `[HH:MM:SS] new image WxH prepared, sending to server`),
-2. POSTs it to `YOLO_API_URL` (prints `[HH:MM:SS] server response: N detections, M person(s), X.XXs`),
-3. draws green boxes around detected persons,
+2. POSTs it to `YOLO_API_URL` (prints `[HH:MM:SS] server response: N detections, M person(s), X.XXs`; in tracking mode also `unique P person(s), V vehicle(s)`),
+3. draws green boxes around detected persons (box coordinates are scaled back to the original frame when the upload was resized),
 4. appends `timestamp, person_count` to `sender/database.csv`,
 5. writes the annotated frame to `sender/processed_frame.jpg`.
 
@@ -226,7 +249,7 @@ Tuning constants at the top of `sender/sender.py`:
 |---|---|---|
 | `PERSON_CLASS_ID` | `0` | COCO class id for "person" |
 | `CONFIDENCE_THRESHOLD` | `0.5` | minimum detection confidence |
-| `POLL_INTERVAL_SECONDS` | `2.0` | delay between frames (server / azure HTTP modes) |
+| `POLL_INTERVAL_SECONDS` | `0.5` | delay between frames (server / azure HTTP modes) — the tracking module needs ~2 fps so consecutive-frame tracks stay alive; `2.0` before tracking was introduced |
 | `BLOB_SEND_INTERVAL_SECONDS` | `5.0` | delay between uploads in `azure-blob` mode — slower than the HTTP poll because every upload becomes a trigger invocation on Azure |
 
 ### Azure modes (optional)

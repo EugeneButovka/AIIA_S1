@@ -1,6 +1,7 @@
 import csv
 import os
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -11,7 +12,7 @@ from azure.storage.blob import BlobServiceClient, ContentSettings
 
 PERSON_CLASS_ID = 0
 CONFIDENCE_THRESHOLD = 0.5
-POLL_INTERVAL_SECONDS = 2.0
+POLL_INTERVAL_SECONDS = 0.5
 BLOB_SEND_INTERVAL_SECONDS = 5.0
 REQUEST_TIMEOUT_SECONDS = 30
 
@@ -37,6 +38,13 @@ def load_deploy_env():
         os.environ.setdefault(key.strip(), value.strip())
 
 
+def env_flag(name, default):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes"}
+
+
 load_deploy_env()
 
 API_URL = os.environ.get("YOLO_API_URL", "http://<YOUR_VM_PUBLIC_IP>/predict")
@@ -44,6 +52,8 @@ AZURE_PREDICT_URL = os.environ.get("AZURE_PREDICT_URL", "")
 AZURE_STORAGE_CONNECTION_STRING = os.environ.get("AZURE_STORAGE_CONNECTION_STRING", "")
 AZURE_UPLOAD_CONTAINER = os.environ.get("AZURE_UPLOAD_CONTAINER", "uploads")
 SEND_MODE = os.environ.get("SEND_MODE", SERVER_MODE).lower()
+CALIBRATION_ENABLED = env_flag("SENDER_CALIBRATION", True)
+RESET_ON_START = env_flag("SENDER_RESET_ON_START", False)
 
 
 def resolve_predict_url(send_mode, server_url, azure_url):
@@ -58,27 +68,75 @@ CSV_FILENAME = OUTPUT_DIR / "database.csv"
 FRAME_FILENAME = OUTPUT_DIR / "processed_frame.jpg"
 
 
-def predict(frame):
-    success, encoded = cv2.imencode(".jpg", frame)
+@dataclass(frozen=True)
+class CalibrationSettings:
+    scale: float
+    quality: int
+
+
+def server_base_url(predict_url):
+    if not predict_url.endswith("/predict"):
+        return None
+    return predict_url[: -len("/predict")]
+
+
+def fetch_calibration(base_url):
+    try:
+        response = requests.get(f"{base_url}/calibration", timeout=REQUEST_TIMEOUT_SECONDS)
+    except requests.RequestException:
+        return None
+    if response.status_code != 200:
+        return None
+    recommendation = response.json().get("recommendation") or {}
+    scale = recommendation.get("scale")
+    quality = recommendation.get("quality")
+    if scale is None or quality is None or not 0 < float(scale) <= 1 or not 1 <= int(quality) <= 100:
+        return None
+    return CalibrationSettings(float(scale), int(quality))
+
+
+def reset_server_counts(base_url):
+    try:
+        response = requests.post(f"{base_url}/reset", timeout=REQUEST_TIMEOUT_SECONDS)
+    except requests.RequestException:
+        return False
+    return response.status_code == 200
+
+
+def encode_frame(frame, calibration):
+    if calibration is None:
+        success, encoded = cv2.imencode(".jpg", frame)
+    else:
+        height, width = frame.shape[:2]
+        target = (max(2, round(width * calibration.scale)), max(2, round(height * calibration.scale)))
+        resized = frame if target == (width, height) else cv2.resize(frame, target, interpolation=cv2.INTER_AREA)
+        success, encoded = cv2.imencode(".jpg", resized, [int(cv2.IMWRITE_JPEG_QUALITY), calibration.quality])
     if not success:
-        return []
+        return None
+    return encoded.tobytes()
+
+
+def predict(frame, calibration=None):
+    image_bytes = encode_frame(frame, calibration)
+    if image_bytes is None:
+        return {}
     response = requests.post(
         PREDICT_URL,
-        files={"file": ("frame.jpg", encoded.tobytes(), "image/jpeg")},
+        files={"file": ("frame.jpg", image_bytes, "image/jpeg")},
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
     response.raise_for_status()
-    return response.json()["detections"]
+    return response.json()
 
 
-def draw_person_boxes(frame, detections):
+def draw_person_boxes(frame, detections, box_scale=1.0):
     person_count = 0
     for detection in detections:
         if detection["class"] != PERSON_CLASS_ID or detection["confidence"] < CONFIDENCE_THRESHOLD:
             continue
         box = detection["box"]
-        top_left = (int(box["x1"]), int(box["y1"]))
-        bottom_right = (int(box["x2"]), int(box["y2"]))
+        top_left = (int(box["x1"] * box_scale), int(box["y1"] * box_scale))
+        bottom_right = (int(box["x2"] * box_scale), int(box["y2"] * box_scale))
         cv2.rectangle(frame, top_left, bottom_right, (0, 255, 0), 2)
         person_count += 1
     return person_count
@@ -147,6 +205,23 @@ def main():
         print(f"Error: Could not open the stream: {STREAM_URL}")
         return
     uploads_container = build_uploads_container() if SEND_MODE == AZURE_BLOB_MODE else None
+    calibration = None
+    if uploads_container is None and SEND_MODE == SERVER_MODE:
+        base_url = server_base_url(PREDICT_URL)
+        if base_url and CALIBRATION_ENABLED:
+            calibration = fetch_calibration(base_url)
+            if calibration is not None:
+                print(
+                    f"calibration applied: scale {calibration.scale}, "
+                    f"JPEG quality {calibration.quality} (from {base_url}/calibration)"
+                )
+            else:
+                print("server has no calibration; sending full-resolution frames")
+        if base_url and RESET_ON_START:
+            if reset_server_counts(base_url):
+                print("server counters reset")
+            else:
+                print("server reset unavailable (legacy module or request failed); counting continues")
     destinations = {
         AZURE_MODE: "azure function",
         AZURE_BLOB_MODE: f"'{AZURE_UPLOAD_CONTAINER}' container",
@@ -164,10 +239,20 @@ def main():
                 run_blob_cycle(frame, uploads_container)
             else:
                 started_at = time.time()
-                detections = predict(frame)
+                payload = predict(frame, calibration)
                 elapsed = time.time() - started_at
-                person_count = draw_person_boxes(frame, detections)
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] {destination} response: {len(detections)} detections, {person_count} person(s), {elapsed:.2f}s")
+                detections = payload.get("detections", [])
+                box_scale = 1.0 / calibration.scale if calibration is not None else 1.0
+                person_count = draw_person_boxes(frame, detections, box_scale=box_scale)
+                unique_note = (
+                    f", unique {payload['unique_persons']} person(s), {payload['unique_vehicles']} vehicle(s)"
+                    if "unique_persons" in payload
+                    else ""
+                )
+                print(
+                    f"[{datetime.now().strftime('%H:%M:%S')}] {destination} response: "
+                    f"{len(detections)} detections, {person_count} person(s){unique_note}, {elapsed:.2f}s"
+                )
                 save_person_count(person_count)
                 cv2.imwrite(str(FRAME_FILENAME), frame)
             interval = (

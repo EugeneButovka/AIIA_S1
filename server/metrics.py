@@ -39,6 +39,9 @@ class PerformanceTracker:
             self._totals["detections"] += entry["detections"]
             self._totals["bytes_in"] += image_bytes
             self._totals["bytes_out"] += response_bytes
+            if "unique_persons" in entry:
+                self._totals["unique_persons"] = entry["unique_persons"]
+                self._totals["unique_vehicles"] = entry["unique_vehicles"]
 
     def history(self) -> List[Dict[str, Any]]:
         with self._lock:
@@ -57,7 +60,7 @@ class PerformanceTracker:
         requests = totals["requests"]
         memory = psutil.virtual_memory()
         per_hour = self._cost.per_hour
-        return {
+        payload = {
             "uptime_seconds": round(uptime, 1),
             "requests": requests,
             "persons_total": totals["persons"],
@@ -80,6 +83,10 @@ class PerformanceTracker:
             "cost_total": round(per_hour * uptime / 3600, 4),
             "resource_history": resource_history,
         }
+        if "unique_persons" in totals:
+            payload["unique_persons"] = totals["unique_persons"]
+            payload["unique_vehicles"] = totals["unique_vehicles"]
+        return payload
 
     def start_background(self) -> None:
         threading.Thread(target=self._sample_resources, daemon=True).start()
